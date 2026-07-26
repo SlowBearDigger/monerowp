@@ -1,0 +1,101 @@
+/* Live payment progress on the order-received / order-pay panel. */
+
+@keyframes moneroGatewayPulse {
+	0%, 100% { opacity: 1; }
+	50% { opacity: 0.35; }
+}
+
+.mg-prog {
+	margin: 6px 0 2px;
+}
+
+.mg-steps {
+	display: flex;
+	align-items: center;
+	gap: 0;
+	font-size: 12px;
+	color: #9ca3af;
+	margin-bottom: 8px;
+}
+
+.mg-steps .s {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	white-space: nowrap;
+}
+
+.mg-steps .bar {
+	flex: 1;
+	height: 2px;
+	background: #e5e7eb;
+	margin: 0 8px;
+	min-width: 14px;
+}
+
+.mg-steps .dot {
+	width: 11px;
+	height: 11px;
+	border-radius: 50%;
+	background: #e5e7eb;
+	flex: none;
+}
+
+.mg-steps .s.done {
+	color: #15803d;
+}
+
+.mg-steps .s.done .dot {
+	background: #15803d;
+}
+
+.mg-steps .bar.done {
+	background: #15803d;
+}
+
+.mg-steps .s.active {
+	color: #b45309;
+}
+
+.mg-steps .s.active .dot {
+	background: #f59e0b;
+	animation: moneroGatewayPulse 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.mg-steps .s.active .dot {
+		animation: none;
+	}
+}
+
+@media (max-width: 480px) {
+	.mg-steps {
+		font-size: 10px;
+	}
+
+	.mg-steps .s {
+		gap: 3px;
+	}
+
+	.mg-steps .bar {
+		margin: 0 4px;
+		min-width: 6px;
+	}
+
+	.mg-steps .dot {
+		width: 8px;
+		height: 8px;
+	}
+}
+
+.mg-msg {
+	font-weight: 600;
+	font-size: 14px;
+}
+
+.mg-tip {
+	font-size: 11px;
+	color: #9ca3af;
+	font-variant-numeric: tabular-nums;
+	margin-top: 3px;
+}

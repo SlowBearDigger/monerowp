@@ -1,0 +1,4 @@
+assets/js/clipboard*.js linguist-generated=true
+assets/js/qrcode*.js linguist-generated=true
+include/crypto/SHA3.php linguist-generated=true
+includes/vendor/monero/*.php linguist-generated=true
