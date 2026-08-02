@@ -1,0 +1,597 @@
+<?php
+/** Pure-PHP Monero payment scanner using daemon RPC and a merchant view key. */
+
+if ( ! defined( 'ABSPATH' ) ) { exit; }
+
+require_once __DIR__ . '/vendor/monero/load.php';
+require_once __DIR__ . '/class-monero-node-config.php';
+
+use MoneroIntegrations\MoneroPhp\Cryptonote;
+
+class Monero_Scanner {
+
+	/** Monero RingCT generator H. */
+	const H_POINT = '8b655970153799af2aeadc9ff1add0ea6c7251d54154cfa92c173a0dd39c1f94';
+
+	private $node;
+	private $nodes;
+	private $cn;
+	private $http_timeout;
+	private $network;
+	private $last_node_error;
+
+	/** The network controls subaddress prefixes; output detection is network-agnostic. */
+	public function __construct( $node, $network = 'mainnet', $http_timeout = 20 ) {
+		// RPC calls fail over; the lowest responding tip prevents early settlement.
+		$this->nodes        = Monero_Node_Config::normalize_list( $node );
+		$this->node         = $this->nodes ? $this->nodes[0] : null;
+		$this->http_timeout = (int) $http_timeout;
+		$this->network      = in_array( $network, array( 'mainnet', 'stagenet', 'testnet' ), true ) ? $network : 'mainnet';
+		$this->cn           = new Cryptonote( $this->network );
+		$this->allow_node_ports();
+	}
+
+	/** Allow only configured Monero RPC ports through WordPress's safe HTTP guard. */
+	private function allow_node_ports() {
+		static $added = false;
+		if ( $added || ! function_exists( 'add_filter' ) ) { return; }
+		$ports = array();
+		foreach ( $this->nodes as $n ) {
+			$p = (int) wp_parse_url( $n['url'], PHP_URL_PORT );
+			if ( $p > 0 ) { $ports[] = $p; }
+		}
+		if ( empty( $ports ) ) { return; }
+		add_filter( 'http_allowed_safe_ports', function ( $allowed ) use ( $ports ) {
+			return array_values( array_unique( array_merge( array_map( 'intval', (array) $allowed ), $ports ) ) );
+		} );
+		$added = true;
+	}
+
+	private function node_rpc( $path, $body ) {
+		// Commitment verification keeps failover responses from forging a payment.
+		foreach ( $this->nodes as $node ) {
+			$r = $this->node_rpc_one( $node, $path, $body );
+			if ( null !== $r ) { return $r; }
+		}
+		return null;
+	}
+
+	public function last_node_error() {
+		return $this->last_node_error;
+	}
+
+	private function node_rpc_one( $node, $path, $body ) {
+		$url     = $node['url'] . $path;
+		$payload = function_exists( 'wp_json_encode' ) ? wp_json_encode( $body ) : json_encode( $body );
+		if ( function_exists( 'wp_safe_remote_post' ) ) {
+			$args         = $this->request_args( $node, array( 'Content-Type' => 'application/json' ) );
+			$args['body'] = $payload;
+			$res          = $this->wordpress_request( $node, $url, 'wp_safe_remote_post', $args );
+			if ( null === $res ) { return null; }
+			$raw = wp_remote_retrieve_body( $res );
+			if ( strlen( $raw ) > 4 * 1024 * 1024 ) { return null; }
+			return json_decode( $raw, true );
+		}
+		// The non-WordPress fallback must never accept local-file schemes.
+		if ( ! in_array( strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ), array( 'http', 'https' ), true ) ) {
+			return null;
+		}
+		$ctx = stream_context_create( array( 'http' => array(
+			'method'        => 'POST',
+			'header'        => "Content-Type: application/json\r\n",
+			'content'       => $payload,
+			'timeout'       => $this->http_timeout,
+			'ignore_errors' => true,
+		) ) );
+		$raw = @file_get_contents( $url, false, $ctx );
+		return $raw === false ? null : json_decode( $raw, true );
+	}
+
+	private function request_args( $node, $headers = array() ) {
+		if ( 'basic' === $node['auth'] ) {
+			$headers['Authorization'] = 'Basic ' . base64_encode( $node['username'] . ':' . $node['password'] );
+		}
+		return array(
+			'timeout'             => $this->http_timeout,
+			'headers'             => $headers,
+			'redirection'         => 0,
+			'limit_response_size' => 4 * 1024 * 1024,
+		);
+	}
+
+	private function wordpress_request( $node, $url, $function, $args ) {
+		$hook = null;
+		if ( 'digest' === $node['auth'] ) {
+			if ( ! $this->digest_auth_available() ) {
+				$this->last_node_error = array( 'code' => 'digest_unavailable', 'url' => $node['url'] );
+				return null;
+			}
+			$origin      = $this->node_origin( $node['url'] );
+			$credentials = $node['username'] . ':' . $node['password'];
+			$hook = function ( $handle, $request_args, $request_url ) use ( $origin, $credentials ) {
+				if ( $origin !== $this->node_origin( $request_url ) ) { return; }
+				if ( is_object( $handle ) && method_exists( $handle, 'setopt' ) ) {
+					$handle->setopt( CURLOPT_HTTPAUTH, CURLAUTH_DIGEST );
+					$handle->setopt( CURLOPT_USERPWD, $credentials );
+					return;
+				}
+				curl_setopt( $handle, CURLOPT_HTTPAUTH, CURLAUTH_DIGEST );
+				curl_setopt( $handle, CURLOPT_USERPWD, $credentials );
+			};
+			add_action( 'http_api_curl', $hook, 10, 3 );
+		}
+		try {
+			$response = $function( $url, $args );
+		} finally {
+			if ( $hook ) { remove_action( 'http_api_curl', $hook, 10 ); }
+		}
+		if ( is_wp_error( $response ) ) {
+			$this->last_node_error = array( 'code' => 'transport', 'url' => $node['url'] );
+			return null;
+		}
+		$code = (int) wp_remote_retrieve_response_code( $response );
+		if ( 401 === $code ) {
+			$this->last_node_error = array( 'code' => 'unauthorized', 'url' => $node['url'], 'status' => 401 );
+			return null;
+		}
+		if ( $code < 200 || $code >= 300 ) {
+			$this->last_node_error = array( 'code' => 'http', 'url' => $node['url'], 'status' => $code );
+			return null;
+		}
+		$this->last_node_error = null;
+		return $response;
+	}
+
+	protected function digest_auth_available() {
+		return function_exists( 'curl_setopt' ) && defined( 'CURLOPT_HTTPAUTH' ) && defined( 'CURLOPT_USERPWD' ) && defined( 'CURLAUTH_DIGEST' );
+	}
+
+	private function node_origin( $url ) {
+		$scheme = strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) );
+		$host   = strtolower( (string) wp_parse_url( $url, PHP_URL_HOST ) );
+		$port   = wp_parse_url( $url, PHP_URL_PORT );
+		if ( ! $port ) { $port = 'https' === $scheme ? 443 : 80; }
+		return $scheme . '://' . $host . ':' . (int) $port;
+	}
+
+	/** Fetch and decode a batch of transactions, or return null on node failure. */
+	public function fetch_txs( $txids ) {
+		$txids = array_values( array_filter( (array) $txids ) );
+		if ( ! $txids ) { return array(); }
+		$resp = $this->node_rpc( '/get_transactions', array( 'txs_hashes' => $txids, 'decode_as_json' => true ) );
+		if ( ! $resp || ! isset( $resp['txs'] ) || ! is_array( $resp['txs'] ) ) { return null; }
+		$out = array();
+		foreach ( $resp['txs'] as $tx ) {
+			$asjson = isset( $tx['as_json'] ) ? json_decode( $tx['as_json'], true ) : null;
+			if ( ! is_array( $asjson ) ) { continue; }
+			$asjson['_txid']         = isset( $tx['tx_hash'] ) ? $tx['tx_hash'] : '';
+			$asjson['_block_height'] = isset( $tx['block_height'] ) ? (int) $tx['block_height'] : null;
+			$asjson['_in_pool']      = ! empty( $tx['in_pool'] );
+			// Only meaningful for mempool conflicts; the 0-conf path refuses them.
+			$asjson['_double_spend_seen'] = ! empty( $tx['double_spend_seen'] );
+			$out[] = $asjson;
+		}
+		return $out;
+	}
+
+	/** Fetch and decode one transaction. */
+	public function fetch_tx( $txid ) {
+		$txs = $this->fetch_txs( array( $txid ) );
+		if ( ! is_array( $txs ) || ! isset( $txs[0] ) ) { return null; }
+		// Reject a node response for a different transaction.
+		if ( strcasecmp( (string) $txs[0]['_txid'], (string) $txid ) !== 0 ) { return null; }
+		return $txs[0];
+	}
+
+	/** Call Monero daemon JSON-RPC. */
+	private function json_rpc( $method, $params = array() ) {
+		$r = $this->node_rpc( '/json_rpc', array( 'jsonrpc' => '2.0', 'id' => '0', 'method' => $method, 'params' => $params ) );
+		return ( is_array( $r ) && isset( $r['result'] ) ) ? $r['result'] : null;
+	}
+
+	/** Verify that a private view key belongs to an address. */
+	public function verify_keys( $address, $view_key ) {
+		try {
+			$dec = $this->cn->decode_address( $address );   // throws on a malformed address
+		} catch ( \Throwable $e ) {
+			return array( 'address_valid' => false, 'key_match' => false );
+		}
+		if ( empty( $dec['viewKey'] ) || empty( $dec['spendKey'] ) ) {
+			return array( 'address_valid' => false, 'key_match' => false );
+		}
+		$derived = '';
+		try { $derived = $this->cn->pk_from_sk( trim( (string) $view_key ) ); } catch ( \Throwable $e ) { $derived = ''; }
+		return array(
+			'address_valid' => true,
+			'key_match'     => '' !== $derived && hash_equals( strtolower( (string) $dec['viewKey'] ), strtolower( $derived ) ),
+		);
+	}
+
+	/** Validate a Monero address checksum and network without a node call. */
+	public function address_valid( $address ) {
+		try {
+			$dec = $this->cn->decode_address( (string) $address );   // throws on bad base58 / checksum
+		} catch ( \Throwable $e ) {
+			return false;
+		}
+		if ( empty( $dec['viewKey'] ) || empty( $dec['spendKey'] ) ) {
+			return false;
+		}
+		// A valid address on the wrong network is still unsafe as a refund target.
+		$valid = array(
+			'mainnet'  => array( '12', '13', '2a' ),   // 18, 19, 42
+			'stagenet' => array( '18', '19', '24' ),   // 24, 25, 36
+			'testnet'  => array( '35', '36', '3f' ),   // 53, 54, 63
+		);
+		$allowed = isset( $valid[ $this->network ] ) ? $valid[ $this->network ] : $valid['mainnet'];
+		$byte    = isset( $dec['networkByte'] ) ? strtolower( (string) $dec['networkByte'] ) : '';
+		return in_array( $byte, $allowed, true );
+	}
+
+	/** Return node reachability, height, and network. */
+	public function node_info() {
+		$r = $this->node_rpc_get( '/get_info' );
+		if ( is_array( $r ) ) {
+			$nettype = isset( $r['nettype'] ) ? (string) $r['nettype']
+				: ( ! empty( $r['stagenet'] ) ? 'stagenet' : ( ! empty( $r['testnet'] ) ? 'testnet' : 'mainnet' ) );
+			return array( 'ok' => true, 'height' => isset( $r['height'] ) ? (int) $r['height'] : null, 'nettype' => $nettype );
+		}
+		$h = $this->tip_height();   // fall back to /get_height (restricted nodes)
+		return null === $h ? array( 'ok' => false, 'height' => null, 'nettype' => 'unknown' )
+			: array( 'ok' => true, 'height' => $h, 'nettype' => 'unknown' );
+	}
+
+	/** Return the non-coinbase transaction hashes in a block. */
+	private function block_tx_hashes( $height ) {
+		$r = $this->json_rpc( 'get_block', array( 'height' => (int) $height ) );
+		if ( null === $r ) { return null; }
+		return isset( $r['tx_hashes'] ) && is_array( $r['tx_hashes'] ) ? $r['tx_hashes'] : array();
+	}
+
+	public function tip_height() {
+		// The lowest responding tip can delay settlement but cannot accelerate it.
+		$heights = array();
+		foreach ( $this->nodes as $node ) {
+			$r = $this->node_rpc_get_one( $node, '/get_height' );
+			if ( $r && isset( $r['height'] ) && (int) $r['height'] > 0 ) { $heights[] = (int) $r['height']; }
+		}
+		return $heights ? min( $heights ) : null;
+	}
+	private function node_rpc_get_one( $node, $path ) {
+		$url = $node['url'] . $path;
+		if ( function_exists( 'wp_safe_remote_get' ) ) {
+			$res = $this->wordpress_request( $node, $url, 'wp_safe_remote_get', $this->request_args( $node ) );
+			if ( null === $res ) { return null; }
+			$raw = wp_remote_retrieve_body( $res );
+			if ( strlen( $raw ) > 4 * 1024 * 1024 ) { return null; }
+			return json_decode( $raw, true );
+		}
+		if ( ! in_array( strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ), array( 'http', 'https' ), true ) ) {
+			return null;
+		}
+		$raw = @file_get_contents( $url );
+		return $raw === false ? null : json_decode( $raw, true );
+	}
+
+	private function node_rpc_get( $path ) {
+		foreach ( $this->nodes as $node ) {
+			$response = $this->node_rpc_get_one( $node, $path );
+			if ( null !== $response ) { return $response; }
+		}
+		return null;
+	}
+
+	private function parse_extra( $extra_bytes ) {
+		$n = count( $extra_bytes ); $pos = 0; $main = null; $additional = array();
+		while ( $pos < $n ) {
+			$tag = $extra_bytes[ $pos++ ];
+			if ( 1 === $tag ) {
+				$main = $this->take_hex( $extra_bytes, $pos, 32, $n );
+				if ( null === $main ) { break; }                     // truncated — stop, don't read past the end
+			} elseif ( 2 === $tag ) {
+				$len = $this->read_varint( $extra_bytes, $pos, $n );
+				$pos = min( $n, $pos + $len );                       // nonce/payment-id — clamp, never overshoot
+			} elseif ( 4 === $tag ) {
+				$cnt = min( $this->read_varint( $extra_bytes, $pos, $n ), 256 ); // a valid tx has ≤ output-count keys
+				for ( $k = 0; $k < $cnt; $k++ ) {
+					$h = $this->take_hex( $extra_bytes, $pos, 32, $n );
+					if ( null === $h ) { break 2; }                  // truncated additional list — stop
+					$additional[] = $h;
+				}
+			} elseif ( 0 === $tag ) {
+				break; // padding — rest is zeros
+			} else {
+				break; // unknown tag — stop rather than misparse
+			}
+		}
+		return array( 'main' => $main, 'additional' => $additional );
+	}
+	private function read_varint( &$b, &$pos, $n ) {
+		$r = 0; $shift = 0;
+		while ( $pos < $n ) { $byte = $b[ $pos++ ]; $r |= ( $byte & 0x7f ) << $shift; if ( 0 === ( $byte & 0x80 ) ) { break; } $shift += 7; }
+		return $r;
+	}
+	private function take_hex( &$b, &$pos, $len, $n = null ) {
+		if ( null !== $n && $pos + $len > $n ) { $pos = $n; return null; }   // would read past the buffer
+		$h = '';
+		for ( $k = 0; $k < $len; $k++ ) { $h .= str_pad( dechex( (int) $b[ $pos++ ] ), 2, '0', STR_PAD_LEFT ); }
+		return $h;
+	}
+
+	private function le8_to_dec( $hex8 ) {
+		$v = gmp_init( 0 ); $bs = str_split( $hex8, 2 );
+		for ( $k = count( $bs ) - 1; $k >= 0; $k-- ) { $v = gmp_add( gmp_mul( $v, 256 ), gmp_init( hexdec( $bs[ $k ] ), 10 ) ); }
+		return gmp_strval( $v );
+	}
+	/** Decode a RingCT amount. */
+	private function decode_amount( $derivation, $i, $ecdh_hex ) {
+		$sk     = $this->cn->derivation_to_scalar( $derivation, $i );
+		$factor = $this->cn->keccak_256( bin2hex( 'amount' ) . $sk );
+		$mask8  = substr( $factor, 0, 16 );
+		$amt    = strlen( $ecdh_hex ) >= 16 ? substr( $ecdh_hex, 0, 16 ) : str_pad( $ecdh_hex, 16, '0' );
+		return $this->le8_to_dec( bin2hex( hex2bin( $amt ) ^ hex2bin( $mask8 ) ) );
+	}
+	/** Verify C_chain = amount·H + mask·G before crediting a decoded amount. */
+	public function check_commitment( $amount_atomic, $derivation, $i, $commitment_hex ) {
+		if ( '' === (string) $commitment_hex || null === $commitment_hex ) {
+			return false; // no commitment to check against → fail closed
+		}
+		$ed   = $this->cn_ed();
+		$sk   = $this->cn->derivation_to_scalar( $derivation, $i );
+		$mask = $this->cn->hash_to_scalar( bin2hex( 'commitment_mask' ) . $sk ); // deterministic mask (hex scalar)
+		$H    = $ed->decodepoint( hex2bin( self::H_POINT ) );
+		$aH   = ( '0' === (string) $amount_atomic ) ? array( 0, 1 ) : $ed->scalarmult( $H, gmp_init( $amount_atomic, 10 ) );
+		$mG   = $ed->scalarmult_base( $ed->decodeint( hex2bin( $mask ) ) );
+		$C    = bin2hex( $ed->encodepoint( $ed->edwards( $aH, $mG ) ) );
+		return hash_equals( strtolower( (string) $commitment_hex ), strtolower( $C ) );
+	}
+	private function cn_ed() {
+		// PHP 8.0 requires access to the protected vendored ed25519 instance.
+		$ref = new ReflectionProperty( get_class( $this->cn ), 'ed25519' );
+		if ( PHP_VERSION_ID < 80100 ) {
+			$ref->setAccessible( true );
+		}
+		return $ref->getValue( $this->cn );
+	}
+
+	/** Verify a transaction payment to an address. */
+	public function verify_payment( $txid, $address, $view_key, $opts = array() ) {
+		$require_commitment = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
+		$tip                = isset( $opts['tip'] ) ? (int) $opts['tip'] : null;
+		$tx = $this->fetch_tx( $txid );
+		if ( ! $tx ) {
+			return array( 'found' => false, 'reason' => 'node did not return the tx' );
+		}
+		return $this->classify_tx( $tx, $address, $view_key, $tip, $require_commitment );
+	}
+
+	/** Detect and decode an output to an address inside one transaction. */
+	public function detect_in_tx( $tx, $address, $view_key ) {
+		$dec = $this->cn->decode_address( $address );
+		if ( empty( $dec['spendKey'] ) ) { return null; }
+		$C_spend = $dec['spendKey'];
+		$extra = $this->parse_extra( isset( $tx['extra'] ) ? $tx['extra'] : array() );
+		$vout  = isset( $tx['vout'] ) ? $tx['vout'] : array();
+		if ( count( $vout ) > 256 ) { return null; } // guard: a real Monero tx has ≤ 16 outputs; 256 is already generous
+		$ecdh  = isset( $tx['rct_signatures']['ecdhInfo'] ) ? $tx['rct_signatures']['ecdhInfo'] : array();
+		$outpk = isset( $tx['rct_signatures']['outPk'] ) ? $tx['rct_signatures']['outPk'] : ( isset( $tx['rctsig_prunable']['outPk'] ) ? $tx['rctsig_prunable']['outPk'] : array() );
+		for ( $i = 0; $i < count( $vout ); $i++ ) {
+			$t       = ( isset( $vout[ $i ]['target'] ) && is_array( $vout[ $i ]['target'] ) ) ? $vout[ $i ]['target'] : array();
+			$out_key = isset( $t['key'] ) ? $t['key'] : ( isset( $t['tagged_key']['key'] ) ? $t['tagged_key']['key'] : null );
+			if ( ! $out_key ) { continue; }
+			$candidates = array();
+			if ( isset( $extra['additional'][ $i ] ) ) { $candidates[] = $extra['additional'][ $i ]; }
+			if ( $extra['main'] ) { $candidates[] = $extra['main']; }
+			foreach ( $candidates as $R ) {
+				// Malformed public keys are not ours and must not stop the scan.
+				try {
+					$derivation = $this->cn->gen_key_derivation( $R, $view_key );
+					$owned      = ( $this->cn->derive_public_key( $derivation, $i, $C_spend ) === $out_key );
+				} catch ( \Throwable $e ) {
+					continue;
+				}
+				if ( ! $owned ) { continue; }
+				// Once owned, decode errors must fail closed instead of becoming silent misses.
+				try {
+					$amt_hex       = isset( $ecdh[ $i ]['amount'] ) ? $ecdh[ $i ]['amount'] : '';
+					$amount_atomic = '' !== $amt_hex ? $this->decode_amount( $derivation, $i, $amt_hex ) : '0';
+					$commitment    = $this->outpk_mask( $outpk, $i );
+					return array(
+						'output_index'  => $i,
+						'amount_atomic' => $amount_atomic,
+						'out_key'       => $out_key,   // one-time output key (P): the burning-bug dedup key
+						// Missing and mismatched commitments fail closed with different diagnostics.
+						'commitment_present' => ( '' !== (string) $commitment && null !== $commitment ),
+						'commitment_ok' => $commitment ? $this->check_commitment( $amount_atomic, $derivation, $i, $commitment ) : false,
+					);
+				} catch ( \Throwable $e ) {
+					// The output is ours but undecodable; keep the failure visible.
+					return array(
+						'output_index'      => $i,
+						'amount_atomic'     => '0',
+						'out_key'           => $out_key,
+						'commitment_present' => false,
+						'commitment_ok'     => false,
+						'errored'           => true,
+					);
+				}
+			}
+		}
+		return null;
+	}
+
+	/** Add confirmations and lock state to a transaction match. */
+	private function classify_tx( $tx, $address, $view_key, $tip, $require_commitment ) {
+		$m = $this->detect_in_tx( $tx, $address, $view_key );
+		if ( null === $m ) { return array( 'found' => false, 'reason' => 'no output to this address' ); }
+		if ( $require_commitment && empty( $m['commitment_ok'] ) ) {
+			$present = ! empty( $m['commitment_present'] );
+			return array( 'found' => true, 'amount_atomic' => $m['amount_atomic'], 'output_index' => $m['output_index'], 'out_key' => isset( $m['out_key'] ) ? $m['out_key'] : '', 'commitment_ok' => false, 'commitment_present' => $present,
+				'reason' => $present ? 'commitment mismatch — decoded amount not committed on-chain' : 'commitment unavailable — the node may be pruned; use a full (non-pruned) node' );
+		}
+		$bh   = isset( $tx['_block_height'] ) ? $tx['_block_height'] : null;
+		$conf = ( null !== $bh && null !== $tip && $bh > 0 ) ? max( 0, $tip - $bh ) : ( ! empty( $tx['_in_pool'] ) ? 0 : null );
+		return array(
+			'found'         => true,
+			'amount_atomic' => $m['amount_atomic'],
+			'output_index'  => $m['output_index'],
+			'confirmations' => $conf,
+			'in_pool'       => ! empty( $tx['_in_pool'] ),
+			'double_spend_seen' => ! empty( $tx['_double_spend_seen'] ),
+			'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
+			'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
+						'commitment_ok' => $m['commitment_ok'],
+			'reason'        => 'ok',
+		);
+	}
+
+	/** Derive a subaddress from a primary address and private view key. */
+	public function subaddress( $major, $minor, $view_key, $primary_address ) {
+		$dec = $this->cn->decode_address( $primary_address );
+		if ( empty( $dec['spendKey'] ) ) { return null; }
+		if ( 0 === (int) $major && 0 === (int) $minor ) {
+			return array( 'address' => $primary_address, 'spend_pub' => $dec['spendKey'] );
+		}
+		$addr = $this->cn->generate_subaddress( (int) $major, (int) $minor, $view_key, $dec['spendKey'] );
+		$sdec = $this->cn->decode_address( $addr );
+		return array( 'address' => $addr, 'spend_pub' => isset( $sdec['spendKey'] ) ? $sdec['spendKey'] : '' );
+	}
+
+	/** Scan a bounded block range and return the first matching payment. */
+	public function scan( $address, $view_key, $from_height, $to_height, $opts = array() ) {
+		$max_blocks = isset( $opts['max_blocks'] ) ? max( 1, (int) $opts['max_blocks'] ) : 30;
+		$budget_s   = isset( $opts['time_budget'] ) ? (float) $opts['time_budget'] : 8.0;
+		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
+		$tip        = isset( $opts['tip'] ) ? (int) $opts['tip'] : (int) $to_height;
+		$start      = microtime( true );
+		$h          = (int) $from_height;
+		$end        = min( (int) $to_height, $h + $max_blocks - 1 );
+		$last       = $h - 1;
+		for ( ; $h <= $end; $h++ ) {
+			if ( ( microtime( true ) - $start ) > $budget_s ) { break; }
+			$hashes = $this->block_tx_hashes( $h );
+			if ( null === $hashes ) { break; }                 // node hiccup — resume next tick
+			foreach ( array_chunk( $hashes, 50 ) as $batch ) {
+				$txs = $this->fetch_txs( $batch );
+				if ( null === $txs ) { return array( 'found' => false, 'scanned_to' => $last ); }
+				foreach ( $txs as $tx ) {
+					$m = $this->detect_in_tx( $tx, $address, $view_key );
+					if ( null === $m ) { continue; }
+					if ( $req_commit && empty( $m['commitment_ok'] ) ) { continue; }
+					$bh   = isset( $tx['_block_height'] ) ? (int) $tx['_block_height'] : $h;
+					$conf = max( 0, $tip - $bh );
+					return array(
+						'found'         => true,
+						'txid'          => isset( $tx['_txid'] ) ? $tx['_txid'] : '',
+						'amount_atomic' => $m['amount_atomic'],
+						'output_index'  => $m['output_index'],
+						'confirmations' => $conf,
+						'in_pool'       => false,
+						'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
+						'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
+						'commitment_ok' => $m['commitment_ok'],
+						'block_height'  => $bh,
+					);
+				}
+			}
+			$last = $h;
+		}
+		return array( 'found' => false, 'scanned_to' => $last );
+	}
+
+	/** Scan a bounded block range and return every matching payment. */
+	public function scan_all( $address, $view_key, $from_height, $to_height, $opts = array() ) {
+		$max_blocks = isset( $opts['max_blocks'] ) ? max( 1, (int) $opts['max_blocks'] ) : 30;
+		$budget_s   = isset( $opts['time_budget'] ) ? (float) $opts['time_budget'] : 8.0;
+		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
+		$tip        = isset( $opts['tip'] ) ? (int) $opts['tip'] : (int) $to_height;
+		$start      = microtime( true );
+		$h          = (int) $from_height;
+		$end        = min( (int) $to_height, $h + $max_blocks - 1 );
+		$last       = $h - 1;
+		$matches    = array();
+		for ( ; $h <= $end; $h++ ) {
+			if ( ( microtime( true ) - $start ) > $budget_s ) { break; }
+			$hashes = $this->block_tx_hashes( $h );
+			if ( null === $hashes ) { break; }                 // node hiccup — resume next tick
+			foreach ( array_chunk( $hashes, 50 ) as $batch ) {
+				$txs = $this->fetch_txs( $batch );
+				if ( null === $txs ) { return array( 'matches' => $matches, 'scanned_to' => $last ); }
+				foreach ( $txs as $tx ) {
+					$m = $this->detect_in_tx( $tx, $address, $view_key );
+					if ( null === $m ) { continue; }
+					if ( $req_commit && empty( $m['commitment_ok'] ) ) { continue; }
+					$bh   = isset( $tx['_block_height'] ) ? (int) $tx['_block_height'] : $h;
+					$conf = max( 0, $tip - $bh );
+					$matches[] = array(
+						'txid'          => isset( $tx['_txid'] ) ? $tx['_txid'] : '',
+						'amount_atomic' => $m['amount_atomic'],
+						'output_index'  => $m['output_index'],
+						'confirmations' => $conf,
+						'in_pool'       => false,
+						'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
+						'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
+						'commitment_ok' => $m['commitment_ok'],
+						'block_height'  => $bh,
+					);
+				}
+			}
+			$last = $h;
+		}
+		return array( 'matches' => $matches, 'scanned_to' => $last );
+	}
+
+	/** Scan the daemon transaction pool for committed outputs. */
+	public function scan_pool( $address, $view_key, $opts = array() ) {
+		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
+		$resp       = $this->node_rpc( '/get_transaction_pool', array() );
+		if ( ! is_array( $resp ) || ! isset( $resp['transactions'] ) || ! is_array( $resp['transactions'] ) ) {
+			return array();
+		}
+
+		$matches = array();
+		foreach ( $resp['transactions'] as $pool_tx ) {
+			$tx = isset( $pool_tx['tx_json'] ) ? json_decode( $pool_tx['tx_json'], true ) : null;
+			if ( ! is_array( $tx ) ) { continue; }
+			$tx['_txid']             = isset( $pool_tx['id_hash'] ) ? (string) $pool_tx['id_hash'] : '';
+			$tx['_block_height']      = null;
+			$tx['_in_pool']           = true;
+			$tx['_double_spend_seen'] = ! empty( $pool_tx['double_spend_seen'] );
+			$result = $this->classify_tx( $tx, $address, $view_key, null, $req_commit );
+			if ( empty( $result['found'] ) || ( $req_commit && empty( $result['commitment_ok'] ) ) ) { continue; }
+			$matches[] = array(
+				'txid'              => $tx['_txid'],
+				'amount_atomic'     => isset( $result['amount_atomic'] ) ? $result['amount_atomic'] : '0',
+				'output_index'      => isset( $result['output_index'] ) ? (int) $result['output_index'] : 0,
+				'confirmations'     => 0,
+				'in_pool'           => true,
+				'locked'            => ! empty( $result['locked'] ),
+				'double_spend_seen' => ! empty( $result['double_spend_seen'] ),
+				'out_key'           => isset( $result['out_key'] ) ? $result['out_key'] : '',
+				'commitment_ok'     => ! empty( $result['commitment_ok'] ),
+				'block_height'      => null,
+			);
+		}
+		return $matches;
+	}
+
+	/** Read an output commitment from either supported daemon shape. */
+	private function outpk_mask( $outpk, $i ) {
+		if ( ! isset( $outpk[ $i ] ) ) { return null; }
+		$v = $outpk[ $i ];
+		if ( is_string( $v ) ) { return $v; }
+		if ( is_array( $v ) && isset( $v['mask'] ) ) { return $v['mask']; }
+		return null;
+	}
+
+	/** Check both forms of unlock_time, conservatively underestimating the tip. */
+	private function is_locked( $unlock_time, $block_height, $conf, $tip ) {
+		$ut = (int) $unlock_time;
+		if ( 0 === $ut ) { return false; }
+		if ( $ut < 500000000 ) {              // block-height form
+			if ( null === $tip ) { return true; }
+			return $ut > ( $tip - 1 );
+		}
+		return $ut > ( time() - 1 );          // timestamp form
+	}
+}
