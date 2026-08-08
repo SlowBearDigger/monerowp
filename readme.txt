@@ -24,7 +24,7 @@ Accept Monero (XMR) payments in WooCommerce. WordPress derives a per-order subad
 = Requirements =
 
 * WordPress 6.2+, PHP 8.0+, WooCommerce
-* PHP extensions GMP and BCMath (both required; the gateway is unavailable until both are enabled)
+* PHP extensions GMP, BCMath, and Mbstring (all required; the gateway is unavailable until they are enabled)
 * A Monero standard (primary) address and matching private view key
 * Reachable monerod daemon RPC (local or remote) on the same network as the address
 
@@ -122,7 +122,7 @@ Any wallet that can show a primary address and private view key (GUI, CLI, or ha
 No. Scanning uses the view key only on the WordPress host against public data returned by your configured monerod node(s).
 
 * Why is the payment method missing at checkout?
-GMP or BCMath may be missing, the address/view key/nodes may be incomplete or invalid, or the node network may not match the address. Check WooCommerce → Settings → Payments → Monero and the admin notices.
+GMP, BCMath, or Mbstring may be missing, the address/view key/nodes may be incomplete or invalid, or the node network may not match the address. Check WooCommerce → Settings → Payments → Monero and the admin notices.
 
 * Do buyers need to stay on the thank-you page?
 No. Cron continues scanning and can expire unpaid orders. The payment page still polls for live status while open.

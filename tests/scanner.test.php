@@ -53,15 +53,16 @@ foreach ( $VECTORS as $name => $v ) {
 	ok( "$name: confirmations present + >= 0",       isset( $r['confirmations'] ) && $r['confirmations'] >= 0, "conf=" . var_export( $r['confirmations'] ?? null, true ) );
 }
 
-// Exercise the full verify-to-settlement pipeline.
+// Exercise the production verify-to-settlement pipeline.
 $pipe = $s->verify_payment( $VECTORS['subaddress']['txid'], $VECTORS['subaddress']['address'], $VIEW, array( 'tip' => $tip, 'require_commitment' => true ) );
 $recv = $pipe['amount_atomic'] ?? '0';
-$v1 = Monero_Util::classify_payment( $recv, $recv, '0', 1, $pipe['confirmations'] ?? 0, false, ! empty( $pipe['locked'] ) );
-ok( 'pipeline: exact nonced amount → paid', $v1['status'] === 'paid' && $v1['paid'] === true );
-$v2 = Monero_Util::classify_payment( gmp_strval( gmp_add( gmp_init( $recv ), 1 ) ), $recv, '0', 1, $pipe['confirmations'] ?? 0, false, false );
-ok( 'pipeline: 1 pico under the order amount → underpaid (no settle)', $v2['status'] === 'underpaid' && $v2['paid'] === false );
-$v3 = Monero_Util::classify_payment( $recv, $recv, '0', 999999, 0, false, false );
-ok( 'pipeline: amount ok but below required confirmations → not paid', $v3['paid'] === false && in_array( $v3['status'], array( 'mempool', 'unconfirmed' ), true ) );
+$row = array_merge( $pipe, array( 'txid' => $VECTORS['subaddress']['txid'] ) );
+$v1 = Monero_Util::summarize_payments( array( $row ), $recv, '0', 1 );
+ok( 'pipeline: exact committed amount → paid', $v1['status'] === 'paid' && $v1['paid'] === true );
+$v2 = Monero_Util::summarize_payments( array( $row ), gmp_strval( gmp_add( gmp_init( $recv ), 1 ) ), '0', 1 );
+ok( 'pipeline: 1 pico under the order amount → partial (no settle)', $v2['status'] === 'partial' && $v2['paid'] === false );
+$v3 = Monero_Util::summarize_payments( array( $row ), $recv, '0', ( $pipe['confirmations'] ?? 0 ) + 1 );
+ok( 'pipeline: amount ok but below required confirmations → not paid', $v3['paid'] === false && $v3['status'] === 'mempool' );
 
 // Derived subaddresses must match monero-ts.
 $BUYER_PRIMARY = '5BEiTonHrFFgGSRAQTknCsEU9jRtGXEVBbv9bZSHCybmUT6aoA2V9M98rLFW2rfzyw5ayituBVETeG9Zkw3AAsyqE4T7N2n';
@@ -71,12 +72,13 @@ ok( 'subaddress(0,0) === the primary address', $s->subaddress( 0, 0, $VIEW, $BUY
 
 // Discover a payment by scanning its block without a known txid.
 $BLOCK = 2144642; // the block c7622a43… landed in
-$hit = $s->scan( $VECTORS['subaddress']['address'], $VIEW, $BLOCK, $BLOCK, array( 'tip' => $tip, 'require_commitment' => true ) );
-ok( 'scan: discovers the payment by block scan (no txid given)', ! empty( $hit['found'] ) && $hit['txid'] === $VECTORS['subaddress']['txid'], $hit['txid'] ?? ( 'scanned_to ' . ( $hit['scanned_to'] ?? '?' ) ) );
-ok( 'scan: decodes the right amount', ( $hit['amount_atomic'] ?? null ) === $VECTORS['subaddress']['expect'] );
+$hit = $s->scan_all( $VECTORS['subaddress']['address'], $VIEW, $BLOCK, $BLOCK, array( 'tip' => $tip, 'require_commitment' => true ) );
+$hit_row = $hit['matches'][0] ?? array();
+ok( 'scan_all: discovers the payment by block scan (no txid given)', $hit_row && $hit_row['txid'] === $VECTORS['subaddress']['txid'], $hit_row['txid'] ?? ( 'scanned_to ' . ( $hit['scanned_to'] ?? '?' ) ) );
+ok( 'scan_all: decodes the right amount', ( $hit_row['amount_atomic'] ?? null ) === $VECTORS['subaddress']['expect'] );
 // Empty scans still advance their checkpoint.
-$miss = $s->scan( $VECTORS['subaddress']['address'], $VIEW, $BLOCK - 1, $BLOCK - 1, array( 'tip' => $tip ) );
-ok( 'scan: empty range → not found + scanned_to checkpoint', empty( $miss['found'] ) && isset( $miss['scanned_to'] ) && $miss['scanned_to'] === $BLOCK - 1 );
+$miss = $s->scan_all( $VECTORS['subaddress']['address'], $VIEW, $BLOCK - 1, $BLOCK - 1, array( 'tip' => $tip ) );
+ok( 'scan_all: empty range → no matches + scanned_to checkpoint', empty( $miss['matches'] ) && isset( $miss['scanned_to'] ) && $miss['scanned_to'] === $BLOCK - 1 );
 
 // A wrong view key must not produce a false positive.
 $bad = $s->verify_payment( $VECTORS['primary']['txid'], $VECTORS['primary']['address'], str_repeat( '0', 64 ), array( 'tip' => $tip, 'require_commitment' => true ) );

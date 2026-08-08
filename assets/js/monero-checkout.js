@@ -74,7 +74,7 @@
 		next.setAttribute('address', addr);
 		next.setAttribute('amount', amount);
 		if (wantLabel) next.setAttribute('label', wantLabel);
-		['theme', 'lang'].forEach(function (a) {
+		['theme', 'lang', 'show-qr'].forEach(function (a) {
 			var v = el.getAttribute(a);
 			if (v) next.setAttribute(a, v);
 		});

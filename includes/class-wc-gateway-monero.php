@@ -110,7 +110,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 	public function validate_xmr_address_field( $key, $value ) {
 		$address = trim( sanitize_text_field( (string) $value ) );
 		if ( ! Monero_Util::crypto_ready() ) {
-			WC_Admin_Settings::add_error( __( 'The Monero address could not be validated because GMP or BCMath is unavailable.', 'monero_gateway' ) );
+			WC_Admin_Settings::add_error( __( 'The Monero address could not be validated because GMP, BCMath, or Mbstring is unavailable.', 'monero_gateway' ) );
 			return $this->get_option( $key );
 		}
 		$standard_prefix = in_array( substr( $address, 0, 1 ), array( '4', '5', '9' ), true );
@@ -422,7 +422,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			return;
 		}
 		echo '<div class="notice notice-error"><p><strong>Monero:</strong> '
-			. esc_html__( 'Payment verification needs the GMP and BCMath extensions. The gateway is hidden until ext-gmp and ext-bcmath are enabled.', 'monero_gateway' )
+			. esc_html__( 'Payment verification needs the GMP, BCMath, and Mbstring extensions. The gateway is hidden until all three are enabled.', 'monero_gateway' )
 			. '</p></div>';
 	}
 
@@ -472,7 +472,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			wp_send_json_error( array( 'msg' => __( 'not allowed', 'monero_gateway' ) ) );
 		}
 		if ( ! Monero_Util::crypto_ready() ) {
-			wp_send_json_error( array( 'msg' => __( 'PHP is missing the GMP or BCMath extension.', 'monero_gateway' ) ) );
+			wp_send_json_error( array( 'msg' => __( 'PHP is missing the GMP, BCMath, or Mbstring extensions.', 'monero_gateway' ) ) );
 		}
 		$address = isset( $_POST['address'] ) ? sanitize_text_field( wp_unslash( $_POST['address'] ) ) : '';
 		$raw_nodes  = isset( $_POST['node_configs'] ) ? json_decode( wp_unslash( $_POST['node_configs'] ), true ) : array();

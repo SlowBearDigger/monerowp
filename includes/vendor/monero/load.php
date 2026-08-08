@@ -1,25 +1,13 @@
 <?php
 /**
- * Vendored, self-contained Monero crypto — no Composer, no PHP extension, no Node.
- * These are the verified primitives the WP-native proof/watch verifier stands on:
- * pure-PHP ed25519 (over GMP/BCMath), Keccak-256, base58, varint, and the cryptonote
- * key-derivation toolbox. We VENDOR them (rather than depend on Composer) so the plugin
- * works on any shared host and so we OWN the exact, audited bytes.
+ * Vendored Monero cryptography.
  *
- * Provenance (pinned for auditability):
- *   ed25519.php, base58.php, Varint.php, Cryptonote.php
- *     — monero-integrations/monerophp @ 25d4c5838b35cbf1fb55170b831e895681a7410a (MIT)
- *   Keccak.php
- *     — kornrunner/php-keccak (MIT) — the correct Monero Keccak-256 padding
+ * MoneroPHP files are based on commit
+ * 25d4c5838b35cbf1fb55170b831e895681a7410a. Keccak.php is based on
+ * kornrunner/php-keccak commit a166c2eb859a21089a6e004949d35b5f9dd0687b.
+ * See LICENSES.md for attribution and license terms.
  *
- * The ed25519 + key-derivation + amount-decode math is fixed in the Monero protocol
- * (unchanged for years) and was cross-checked against monero-ts on real stagenet
- * payments (see docs/WP-NATIVE-VERIFICATION.md): primary + per-order subaddress
- * detection and RingCT amount decode all reproduced exactly. monerophp itself is
- * unmaintained, which is WHY we vendor + own it; it runs clean on PHP 8.5.
- *
- * Requires BOTH the GMP and BCMath extensions: base58 is BCMath-only, the money math is
- * GMP-only, and ed25519 uses GMP when present (BCMath fallback works but is ~10x slower).
+ * Requires the GMP, BCMath, and Mbstring PHP extensions.
  */
 
 if ( ! defined( 'ABSPATH' ) ) { exit; }

@@ -44,10 +44,12 @@ ok_parity( 'expired view does not guess cancelled orders', array( 'expired' ) ==
 ok_parity( 'invalid view falls back to all', array() === Monero_Gateway_Admin_Payments_List::status_values_for_view( 'garbage' ) );
 $gateway_source = file_get_contents( __DIR__ . '/../includes/class-wc-gateway-monero.php' );
 $widget_source  = file_get_contents( __DIR__ . '/../assets/js/monero-pay.js' );
+$checkout_source = file_get_contents( __DIR__ . '/../assets/js/monero-checkout.js' );
 $plugin_source  = file_get_contents( __DIR__ . '/../monero-woocommerce-gateway.php' );
 ok_parity( 'legacy show_qr option restored', false !== strpos( $gateway_source, "'show_qr'" ) && false !== strpos( $gateway_source, "'default' => 'yes'" ) );
 ok_parity( 'QR disabled without hiding payment panel', false !== strpos( $widget_source, "getAttribute('show-qr') !== 'no'" ) && false !== strpos( $widget_source, "showQr ? '<div class=\"qrwrap\"" ) );
 ok_parity( 'QR dependency loads before the widget', false !== strpos( $plugin_source, "array( 'monero-gateway-qr' )" ) && file_exists( __DIR__ . '/../assets/js/qrcode-generator.min.js' ) );
+ok_parity( 'top-up widget preserves show-qr preference', false !== strpos( $checkout_source, "['theme', 'lang', 'show-qr']" ) );
 
 require_once __DIR__ . '/../includes/class-monero-discount.php';
 ok_parity( 'discount clamps negative to zero', 0.0 === Monero_Gateway_Discount::normalize_percentage( '-1' ) );

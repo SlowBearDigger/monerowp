@@ -22,7 +22,7 @@ WooCommerce payment gateway for Monero (XMR). The merchant sets a primary addres
 ## Requirements
 
 * WordPress 6.2+, PHP 8.0+, WooCommerce
-* PHP extensions **GMP** and **BCMath** (both required; gateway hidden until both are enabled)
+* PHP extensions **GMP**, **BCMath**, and **Mbstring** (all required; gateway hidden until they are enabled)
 * Monero standard (primary) address and matching private view key
 * monerod daemon RPC reachable from the WordPress host (same network as the address)
 
@@ -74,4 +74,3 @@ Deactivate and delete via Plugins. Uninstall removes gateway settings, plugin op
 ## Donations
 
 monero-integrations: 44krVcL6TPkANjpFwS2GWvg1kJhTrN7y9heVeQiDJ3rP8iGbCd5GeA4f3c2NKYHC1R4mCgnW7dsUUUae2m9GiNBGT4T8s2X
-

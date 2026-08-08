@@ -457,48 +457,6 @@ class Monero_Scanner {
 		return array( 'address' => $addr, 'spend_pub' => isset( $sdec['spendKey'] ) ? $sdec['spendKey'] : '' );
 	}
 
-	/** Scan a bounded block range and return the first matching payment. */
-	public function scan( $address, $view_key, $from_height, $to_height, $opts = array() ) {
-		$max_blocks = isset( $opts['max_blocks'] ) ? max( 1, (int) $opts['max_blocks'] ) : 30;
-		$budget_s   = isset( $opts['time_budget'] ) ? (float) $opts['time_budget'] : 8.0;
-		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
-		$tip        = isset( $opts['tip'] ) ? (int) $opts['tip'] : (int) $to_height;
-		$start      = microtime( true );
-		$h          = (int) $from_height;
-		$end        = min( (int) $to_height, $h + $max_blocks - 1 );
-		$last       = $h - 1;
-		for ( ; $h <= $end; $h++ ) {
-			if ( ( microtime( true ) - $start ) > $budget_s ) { break; }
-			$hashes = $this->block_tx_hashes( $h );
-			if ( null === $hashes ) { break; }                 // node hiccup — resume next tick
-			foreach ( array_chunk( $hashes, 50 ) as $batch ) {
-				$txs = $this->fetch_txs( $batch );
-				if ( null === $txs ) { return array( 'found' => false, 'scanned_to' => $last ); }
-				foreach ( $txs as $tx ) {
-					$m = $this->detect_in_tx( $tx, $address, $view_key );
-					if ( null === $m ) { continue; }
-					if ( $req_commit && empty( $m['commitment_ok'] ) ) { continue; }
-					$bh   = isset( $tx['_block_height'] ) ? (int) $tx['_block_height'] : $h;
-					$conf = max( 0, $tip - $bh );
-					return array(
-						'found'         => true,
-						'txid'          => isset( $tx['_txid'] ) ? $tx['_txid'] : '',
-						'amount_atomic' => $m['amount_atomic'],
-						'output_index'  => $m['output_index'],
-						'confirmations' => $conf,
-						'in_pool'       => false,
-						'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
-						'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
-						'commitment_ok' => $m['commitment_ok'],
-						'block_height'  => $bh,
-					);
-				}
-			}
-			$last = $h;
-		}
-		return array( 'found' => false, 'scanned_to' => $last );
-	}
-
 	/** Scan a bounded block range and return every matching payment. */
 	public function scan_all( $address, $view_key, $from_height, $to_height, $opts = array() ) {
 		$max_blocks = isset( $opts['max_blocks'] ) ? max( 1, (int) $opts['max_blocks'] ) : 30;
