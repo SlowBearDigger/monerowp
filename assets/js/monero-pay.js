@@ -7,6 +7,7 @@
             scanToSend: 'Scan or tap to send',
             addrLabel: 'Payment address: click to copy',
             copied: 'Copied ✓',
+            copyFailed: 'Copy failed. Copy the address manually.',
             openWallet: 'Open in wallet',
             trustToggle: 'Non-custodial · verify this payment',
             trustFunds: 'Funds go directly to the merchant’s wallet. This page never holds your money.',
@@ -24,6 +25,7 @@
             scanToSend: 'Escanea o toca para enviar',
             addrLabel: 'Dirección de pago: clic para copiar',
             copied: 'Copiada ✓',
+            copyFailed: 'No se pudo copiar. Copia la dirección manualmente.',
             openWallet: 'Abrir en wallet',
             trustToggle: 'No-custodial · verifica este pago',
             trustFunds: 'Los fondos van directo a la wallet del comerciante. Esta página nunca toca tu dinero.',
@@ -57,6 +59,8 @@
         '.addr{width:100%;background:var(--xp-input);border:1px solid var(--xp-border);border-radius:var(--xp-radius-sm);color:var(--xp-fg);font-family:var(--xp-mono);font-size:10.5px;text-align:left;padding:8px;word-break:break-all;cursor:pointer;line-height:1.5;}',
         '.addr:hover{background:var(--xp-accent);color:#fff;}',
         '.addr b{color:var(--xp-accent);font-weight:800;}.addr:hover b{color:#fff;}',
+        '.copy-status{display:block;min-height:15px;margin-top:4px;font-size:10px;color:var(--xp-muted);}',
+        '.copy-status.error{color:var(--xp-red);font-weight:700;}',
         '.wallet{display:block;text-align:center;margin-top:8px;background:var(--xp-accent);color:#fff;border-radius:var(--xp-radius-sm);font-size:12px;font-weight:700;text-decoration:none;padding:11px;}',
         '.wallet:hover{background:#e25c00;color:#fff;}',
         '.tgl{width:100%;background:none;border:0;border-top:1px solid var(--xp-input);color:var(--xp-muted);font-family:var(--xp-font);font-size:10px;font-weight:700;text-transform:uppercase;padding:10px 4px;cursor:pointer;display:flex;justify-content:space-between;gap:8px;}',
@@ -82,6 +86,38 @@
         amount = String(amount == null ? '' : amount).trim();
         if (!/^\d+(\.\d{1,12})?$/.test(amount) || amount.indexOf('.') < 0) return amount;
         return amount.replace(/0+$/, '').replace(/\.$/, '');
+    }
+
+    function xpFallbackCopy(value) {
+        if (!document.body || typeof document.execCommand !== 'function') return false;
+
+        var input;
+        var appended = false;
+
+        try {
+            input = document.createElement('textarea');
+            input.value = value;
+            input.setAttribute('readonly', '');
+            input.style.position = 'fixed';
+            input.style.opacity = '0';
+            input.style.pointerEvents = 'none';
+            document.body.appendChild(input);
+            appended = true;
+            input.focus();
+            input.select();
+            input.setSelectionRange(0, input.value.length);
+            return Boolean(document.execCommand('copy'));
+        } catch (error) {
+            return false;
+        } finally {
+            if (appended) {
+                try {
+                    document.body.removeChild(input);
+                } catch (error) {
+                    // The copy result is still valid if browser cleanup fails.
+                }
+            }
+        }
     }
 
     function xpQrSvg(text, label) {
@@ -171,6 +207,7 @@
                 '<div class="sec"><div class="lbl" style="margin-bottom:4px">' + t.addrLabel + '</div>' +
                 '<button class="addr" type="button" aria-label="' + xpEsc(t.addrLabel + ': ' + address) + '">' +
                 '<b>' + head + '</b>' + middle + '<b>' + tail + '</b></button>' +
+                '<span class="copy-status" role="status" aria-live="polite"></span>' +
                 '<a class="wallet" href="' + xpEsc(uri) + '">' + t.openWallet + '</a></div>' +
                 '<div class="sec"><button class="tgl trust-toggle" type="button" aria-expanded="false" aria-controls="monero-pay-trust">' +
                 '<span>⛨ ' + t.trustToggle + '</span><span class="car" aria-hidden="true">▾</span></button>' +
@@ -187,22 +224,47 @@
 
         _wire(root, address, t) {
             var addressButton = root.querySelector('.addr');
-            if (addressButton) {
+            var copyStatus = root.querySelector('.copy-status');
+            if (addressButton && copyStatus) {
+                var feedbackTimer = null;
+                var copyAttempt = 0;
                 addressButton.addEventListener('click', function () {
-                    var original = addressButton.innerHTML;
-                    var originalLabel = addressButton.getAttribute('aria-label');
-                    var done = function () {
-                        addressButton.textContent = t.copied;
-                        addressButton.setAttribute('aria-label', t.copied);
-                        setTimeout(function () {
-                            addressButton.innerHTML = original;
-                            addressButton.setAttribute('aria-label', originalLabel);
+                    var currentAttempt = ++copyAttempt;
+                    var showFeedback = function (message, isError) {
+                        if (currentAttempt !== copyAttempt) return;
+                        if (feedbackTimer !== null) clearTimeout(feedbackTimer);
+                        copyStatus.textContent = message;
+                        copyStatus.classList.toggle('error', isError);
+                        feedbackTimer = setTimeout(function () {
+                            copyStatus.textContent = '';
+                            copyStatus.classList.toggle('error', false);
+                            feedbackTimer = null;
                         }, 1600);
                     };
+                    var copied = function () {
+                        showFeedback(t.copied, false);
+                    };
+                    var fallback = function () {
+                        if (currentAttempt !== copyAttempt) return;
+                        var copiedWithFallback = xpFallbackCopy(address);
+                        try {
+                            addressButton.focus();
+                        } catch (error) {
+                            // Feedback must still be shown when focus cannot be restored.
+                        }
+                        showFeedback(
+                            copiedWithFallback ? t.copied : t.copyFailed,
+                            !copiedWithFallback
+                        );
+                    };
                     if (navigator.clipboard && navigator.clipboard.writeText) {
-                        navigator.clipboard.writeText(address).then(done, done);
+                        try {
+                            navigator.clipboard.writeText(address).then(copied, fallback);
+                        } catch (error) {
+                            fallback();
+                        }
                     } else {
-                        done();
+                        fallback();
                     }
                 });
             }
