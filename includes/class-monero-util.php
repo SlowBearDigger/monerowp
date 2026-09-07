@@ -15,21 +15,21 @@ class Monero_Util {
 
 	/** Format a canonical XMR amount with piconero precision. */
 	public static function fmt( $xmr ) {
-		$xmr = (float) $xmr;
-		if ( ! is_finite( $xmr ) || $xmr <= 0 ) {
-			return '0';
-		}
-		// Round in piconero space so float tails cannot reach the payment amount.
-		return self::pico_to_string( (int) round( $xmr * 1000000000000 ) );
+		return self::pico_to_string( self::xmr_to_pico( $xmr ) );
 	}
 
 	/** Convert XMR to exact piconero. */
 	public static function xmr_to_pico( $xmr ) {
-		$xmr = (float) $xmr;
-		if ( ! is_finite( $xmr ) || $xmr <= 0 ) {
-			return 0;
+		$value = trim( (string) $xmr );
+		if ( ! preg_match( '/^(\d+)(?:\.(\d*))?$/D', $value, $parts ) ) {
+			$number = (float) $xmr;
+			if ( ! is_finite( $number ) || $number <= 0 ) { return 0; }
+			preg_match( '/^(\d+)\.(\d{12})$/D', sprintf( '%.12F', $number ), $parts );
 		}
-		return (int) round( $xmr * 1000000000000 );
+		$fraction = isset( $parts[2] ) ? $parts[2] : '';
+		$pico     = gmp_init( ltrim( $parts[1] . str_pad( substr( $fraction, 0, self::XMR_DECIMALS ), self::XMR_DECIMALS, '0' ), '0' ) ?: '0', 10 );
+		if ( isset( $fraction[ self::XMR_DECIMALS ] ) && $fraction[ self::XMR_DECIMALS ] >= '5' ) { $pico = gmp_add( $pico, 1 ); }
+		return (int) gmp_strval( $pico );
 	}
 
 	/** Format piconero as XMR without integer truncation. */
@@ -50,12 +50,16 @@ class Monero_Util {
 
 	/** Keep order keys out of third-party redirects. */
 	public static function same_origin( $url, $home ) {
-		$h = wp_parse_url( (string) $url, PHP_URL_HOST );
-		if ( empty( $h ) ) {
-			return true;
-		}
-		$hh = wp_parse_url( (string) $home, PHP_URL_HOST );
-		return strtolower( $h ) === strtolower( (string) $hh );
+		$host = wp_parse_url( (string) $url, PHP_URL_HOST );
+		if ( empty( $host ) ) { return '' === (string) wp_parse_url( (string) $url, PHP_URL_SCHEME ); }
+		$scheme      = strtolower( (string) wp_parse_url( (string) $url, PHP_URL_SCHEME ) );
+		$home_scheme = strtolower( (string) wp_parse_url( (string) $home, PHP_URL_SCHEME ) );
+		$port        = (int) wp_parse_url( (string) $url, PHP_URL_PORT ) ?: ( 'https' === $scheme ? 443 : 80 );
+		$home_port   = (int) wp_parse_url( (string) $home, PHP_URL_PORT ) ?: ( 'https' === $home_scheme ? 443 : 80 );
+		return in_array( $scheme, array( 'http', 'https' ), true )
+			&& $scheme === $home_scheme
+			&& $port === $home_port
+			&& strtolower( (string) $host ) === strtolower( (string) wp_parse_url( (string) $home, PHP_URL_HOST ) );
 	}
 
 	/** Read a row amount as non-negative GMP. */
@@ -123,7 +127,7 @@ class Monero_Util {
 			if ( ! empty( $t['double_spend_seen'] ) ) { $pending = gmp_add( $pending, $amt ); continue; }
 			$confs   = ( isset( $t['confirmations'] ) && null !== $t['confirmations'] ) ? (int) $t['confirmations'] : null;
 			$in_pool = ! empty( $t['in_pool'] );
-			if ( ! $in_pool && null !== $confs && $confs >= $min_conf ) {
+			if ( ( $in_pool && 0 === $min_conf ) || ( ! $in_pool && null !== $confs && $confs >= $min_conf ) ) {
 				$confirmed = gmp_add( $confirmed, $amt );
 				$min_confs = ( null === $min_confs ) ? $confs : min( $min_confs, $confs );
 			} else {

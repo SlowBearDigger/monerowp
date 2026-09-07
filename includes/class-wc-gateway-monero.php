@@ -12,6 +12,19 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 	const REORG_LOOKBACK = 3;
 	private $scanner_instance;
 
+	/** Map 3.x settings without removing the values needed for rollback. */
+	public static function migrate_legacy_settings( $settings ) {
+		$settings = is_array( $settings ) ? $settings : array();
+		$map = array( 'monero_address' => 'xmr_address', 'viewkey' => 'view_key', 'confirms' => 'min_confirmations' );
+		foreach ( $map as $old => $new ) {
+			if ( ! array_key_exists( $new, $settings ) && array_key_exists( $old, $settings ) ) { $settings[ $new ] = (string) $settings[ $old ]; }
+		}
+		if ( ! array_key_exists( 'expiry_hours', $settings ) && isset( $settings['valid_time'] ) ) {
+			$settings['expiry_hours'] = (string) ceil( max( 0, (int) $settings['valid_time'] ) / 3600 );
+		}
+		return $settings;
+	}
+
 	public function __construct( $register_hooks = true ) {
 		$this->id                 = 'monero_gateway';
 		$this->method_title       = __( 'Monero', 'monero_gateway' );
@@ -154,23 +167,6 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		return (string) Monero_Gateway_Discount::normalize_percentage( $value );
 	}
 
-	public function validate_nodes_field( $key, $value ) {
-		$nodes = array_values( array_filter( array_map( 'trim', explode( ',', sanitize_text_field( (string) $value ) ) ) ) );
-		foreach ( $nodes as $node ) {
-			$scheme = strtolower( (string) wp_parse_url( $node, PHP_URL_SCHEME ) );
-			$host   = (string) wp_parse_url( $node, PHP_URL_HOST );
-			if ( ! in_array( $scheme, array( 'http', 'https' ), true ) || '' === $host ) {
-				WC_Admin_Settings::add_error( __( 'Each Monero node must be a valid HTTP(S) URL with a host.', 'monero_gateway' ) );
-				return $this->get_option( $key );
-			}
-		}
-		if ( ! $nodes ) {
-			WC_Admin_Settings::add_error( __( 'Enter at least one Monero node URL.', 'monero_gateway' ) );
-			return $this->get_option( $key );
-		}
-		return implode( ', ', $nodes );
-	}
-
 	public function generate_node_list_html( $key, $data ) {
 		$rows = $this->get_option( 'node_configs', $this->get_option( 'nodes', isset( $data['default'] ) ? $data['default'] : '' ) );
 		return '<tr><th scope="row" class="titledesc">' . esc_html( $data['title'] ) . '</th><td class="forminp">' . Monero_Node_Fields::render( $rows ) . '<p class="description">' . wp_kses_post( $data['description'] ) . '</p></td></tr>';
@@ -255,7 +251,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				'title'       => __( 'Monero node(s)', 'monero_gateway' ),
 				'type'        => 'node_list',
 				'default'     => '',
-				'description' => __( 'Add public or private nodes in priority order. Requests fail over to the next node; all nodes must match the address network.', 'monero_gateway' ),
+				'description' => __( 'Add your own or otherwise trusted nodes in priority order. Requests fail over to the next node; all nodes must match the address network.', 'monero_gateway' ),
 			),
 			'min_confirmations' => array(
 				'title'             => __( 'Confirmations required', 'monero_gateway' ),
@@ -1012,14 +1008,15 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 	public function ajax_status() {
 		$ip     = isset( $_SERVER['REMOTE_ADDR'] ) ? sanitize_text_field( wp_unslash( $_SERVER['REMOTE_ADDR'] ) ) : '';
 		$rl_key = 'monero_gateway_rl_s_' . get_current_blog_id() . '_' . substr( md5( $ip ), 0, 16 );
-		if ( (int) get_transient( $rl_key ) > 30 ) {
+		$requests = (int) get_transient( $rl_key );
+		if ( $requests >= 30 ) {
 			wp_send_json( array( 'error' => 'too many requests' ), 429 );
 		}
+		set_transient( $rl_key, $requests + 1, 60 );
 		$order_id = isset( $_GET['order_id'] ) ? absint( wp_unslash( $_GET['order_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		$key      = isset( $_GET['key'] ) ? sanitize_text_field( wp_unslash( $_GET['key'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 		$order    = $order_id ? wc_get_order( $order_id ) : false;
 		if ( ! $order || ! hash_equals( $order->get_order_key(), $key ) || $order->get_payment_method() !== $this->id ) {
-			set_transient( $rl_key, (int) get_transient( $rl_key ) + 1, 60 );
 			wp_send_json( array( 'error' => 'not found' ), 404 );
 		}
 		if ( $order->is_paid() ) {
@@ -1159,11 +1156,17 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				$this->log( 'expiry deferred for order #' . $order_id . ' — scan checkpoint ' . $checkpoint . ' does not cover current tip ' . $tip, 'debug' );
 				continue;
 			}
-			$pool_rows = $this->scanner()->scan_pool(
+			$scanner = $this->scanner();
+			$scanner->set_time_budget( 8 );
+			$pool_rows = $scanner->scan_pool(
 				(string) $order->get_meta( '_monero_address' ),
 				$this->view_key(),
 				array( 'require_commitment' => true )
 			);
+			if ( null === $pool_rows ) {
+				$this->log( 'expiry deferred for order #' . $order_id . ' — transaction pool RPC unavailable', 'warning' );
+				continue;
+			}
 			if ( ! empty( $pool_rows ) ) {
 				$this->log( 'expiry deferred for order #' . $order_id . ' — committed Monero payment detected in the transaction pool' );
 				continue;
@@ -1224,11 +1227,10 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		}
 
 		$order_id = $order->get_id();
-		$cooldown = 'monero_gateway_scancd_' . get_current_blog_id() . '_' . $order_id;
-		if ( false !== get_transient( $cooldown ) ) {
+		$cooldown = 'scan_' . $order_id;
+		if ( ! $this->acquire_lock( $cooldown, 20 ) ) {
 			return 'busy';
 		}
-		set_transient( $cooldown, 1, 20 );
 
 		$address = (string) $order->get_meta( '_monero_address' );
 		$view    = $this->view_key();
@@ -1236,10 +1238,11 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			return 'skip';
 		}
 		$scanner = $this->scanner();
+		$scanner->set_time_budget( $time_budget );
 		$tip     = $scanner->tip_height();
 		if ( null === $tip ) {
 			$this->log( 'scan failed for order #' . $order_id . ' — no Monero node returned a tip height', 'warning' );
-			delete_transient( $cooldown );
+			$this->release_lock( $cooldown );
 			return 'unreachable';
 		}
 
@@ -1278,13 +1281,23 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				'commitment_ok' => ! empty( $result['commitment_ok'] ),
 			);
 		}
+		$pool_reachable = true;
+		$pool_matches   = array();
+		if ( 0 === $min_conf ) {
+			$pool_matches = $scanner->scan_pool( $address, $view, array( 'require_commitment' => true ) );
+			if ( null === $pool_matches ) {
+				$pool_reachable = false;
+				$pool_matches   = array();
+				$this->log( 'zero-conf scan incomplete for order #' . $order_id . ' — transaction pool RPC unavailable', 'warning' );
+			}
+		}
 
 		$birthday   = (int) $order->get_meta( '_monero_birthday' );
 		$checkpoint = (int) $order->get_meta( '_monero_scan_height' );
 		$from       = max( $birthday, $checkpoint - self::REORG_LOOKBACK );
 		if ( $from > $tip ) {
 			$this->log( 'scan deferred for order #' . $order_id . ' — start block ' . $from . ' is ahead of current tip ' . $tip, 'warning' );
-			delete_transient( $cooldown );
+			$this->release_lock( $cooldown );
 			return 'unreachable';
 		}
 		$scan_target = min( max( 0, (int) $tip - 1 ), $checkpoint + max( 1, (int) $max_blocks ) );
@@ -1300,9 +1313,9 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		$scan_reachable = $scan_complete || $scanned_to >= $from;
 		if ( ! $scan_complete ) {
 			$this->log( 'scan stopped early for order #' . $order_id . ' at block ' . $scanned_to . ' before ' . $scan_target . ' — node RPC unavailable or time budget exhausted', 'warning' );
-			delete_transient( $cooldown );
+			$this->release_lock( $cooldown );
 		}
-		$matches = isset( $scan['matches'] ) && is_array( $scan['matches'] ) ? $scan['matches'] : array();
+		$matches = array_merge( isset( $scan['matches'] ) && is_array( $scan['matches'] ) ? $scan['matches'] : array(), $pool_matches );
 		foreach ( $matches as $match ) {
 			$rows[] = $match;
 			if ( '' !== (string) $match['txid'] && ! in_array( $match['txid'], $txids, true ) ) {
@@ -1380,7 +1393,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			$order->delete_meta_data( '_monero_partial_flagged' );
 			$order->save();
 		}
-		return $scan_reachable ? 'none' : 'unreachable';
+		return $scan_reachable && $pool_reachable ? 'none' : 'unreachable';
 	}
 
 	/** Complete an order once, recording verified payment details. */

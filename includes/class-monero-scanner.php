@@ -13,43 +13,39 @@ class Monero_Scanner {
 	/** Monero RingCT generator H. */
 	const H_POINT = '8b655970153799af2aeadc9ff1add0ea6c7251d54154cfa92c173a0dd39c1f94';
 
-	private $node;
 	private $nodes;
 	private $cn;
 	private $http_timeout;
 	private $network;
 	private $last_node_error;
+	private $deadline = 0.0;
 
 	/** The network controls subaddress prefixes; output detection is network-agnostic. */
 	public function __construct( $node, $network = 'mainnet', $http_timeout = 20 ) {
 		// RPC calls fail over; the lowest responding tip prevents early settlement.
 		$this->nodes        = Monero_Node_Config::normalize_list( $node );
-		$this->node         = $this->nodes ? $this->nodes[0] : null;
 		$this->http_timeout = (int) $http_timeout;
 		$this->network      = in_array( $network, array( 'mainnet', 'stagenet', 'testnet' ), true ) ? $network : 'mainnet';
 		$this->cn           = new Cryptonote( $this->network );
-		$this->allow_node_ports();
 	}
 
-	/** Allow only configured Monero RPC ports through WordPress's safe HTTP guard. */
-	private function allow_node_ports() {
-		static $added = false;
-		if ( $added || ! function_exists( 'add_filter' ) ) { return; }
-		$ports = array();
-		foreach ( $this->nodes as $n ) {
-			$p = (int) wp_parse_url( $n['url'], PHP_URL_PORT );
-			if ( $p > 0 ) { $ports[] = $p; }
-		}
-		if ( empty( $ports ) ) { return; }
-		add_filter( 'http_allowed_safe_ports', function ( $allowed ) use ( $ports ) {
-			return array_values( array_unique( array_merge( array_map( 'intval', (array) $allowed ), $ports ) ) );
-		} );
-		$added = true;
+	/** Clamp all following RPC calls to one overall operation budget. */
+	public function set_time_budget( $seconds ) {
+		$this->deadline = microtime( true ) + max( 0.1, (float) $seconds );
+	}
+
+	private function budget_exhausted() {
+		return $this->deadline > 0 && microtime( true ) >= $this->deadline;
+	}
+
+	private function request_timeout() {
+		return $this->deadline > 0 ? max( 0.01, min( $this->http_timeout, $this->deadline - microtime( true ) ) ) : $this->http_timeout;
 	}
 
 	private function node_rpc( $path, $body ) {
 		// Commitment verification keeps failover responses from forging a payment.
 		foreach ( $this->nodes as $node ) {
+			if ( $this->budget_exhausted() ) { break; }
 			$r = $this->node_rpc_one( $node, $path, $body );
 			if ( null !== $r ) { return $r; }
 		}
@@ -80,7 +76,7 @@ class Monero_Scanner {
 			'method'        => 'POST',
 			'header'        => "Content-Type: application/json\r\n",
 			'content'       => $payload,
-			'timeout'       => $this->http_timeout,
+			'timeout'       => $this->request_timeout(),
 			'ignore_errors' => true,
 		) ) );
 		$raw = @file_get_contents( $url, false, $ctx );
@@ -92,7 +88,7 @@ class Monero_Scanner {
 			$headers['Authorization'] = 'Basic ' . base64_encode( $node['username'] . ':' . $node['password'] );
 		}
 		return array(
-			'timeout'             => $this->http_timeout,
+			'timeout'             => $this->request_timeout(),
 			'headers'             => $headers,
 			'redirection'         => 0,
 			'limit_response_size' => 4 * 1024 * 1024,
@@ -100,13 +96,25 @@ class Monero_Scanner {
 	}
 
 	private function wordpress_request( $node, $url, $function, $args ) {
+		if ( 'digest' === $node['auth'] && ! $this->digest_auth_available() ) {
+			$this->last_node_error = array( 'code' => 'digest_unavailable', 'url' => $node['url'] );
+			return null;
+		}
+		$origin = $this->node_origin( $node['url'] );
+		$host   = strtolower( (string) wp_parse_url( $node['url'], PHP_URL_HOST ) );
+		$port   = (int) wp_parse_url( $node['url'], PHP_URL_PORT );
+		if ( ! $port ) { $port = 'https' === strtolower( (string) wp_parse_url( $node['url'], PHP_URL_SCHEME ) ) ? 443 : 80; }
+		$host_hook = function ( $external, $request_host, $request_url ) use ( $host, $origin ) {
+			return $external || ( $host === strtolower( (string) $request_host ) && $origin === $this->node_origin( $request_url ) );
+		};
+		$port_hook = function ( $allowed ) use ( $port ) {
+			return array_values( array_unique( array_merge( array_map( 'intval', (array) $allowed ), array( $port ) ) ) );
+		};
+		add_filter( 'http_request_host_is_external', $host_hook, 10, 3 );
+		add_filter( 'http_allowed_safe_ports', $port_hook );
+
 		$hook = null;
 		if ( 'digest' === $node['auth'] ) {
-			if ( ! $this->digest_auth_available() ) {
-				$this->last_node_error = array( 'code' => 'digest_unavailable', 'url' => $node['url'] );
-				return null;
-			}
-			$origin      = $this->node_origin( $node['url'] );
 			$credentials = $node['username'] . ':' . $node['password'];
 			$hook = function ( $handle, $request_args, $request_url ) use ( $origin, $credentials ) {
 				if ( $origin !== $this->node_origin( $request_url ) ) { return; }
@@ -124,6 +132,8 @@ class Monero_Scanner {
 			$response = $function( $url, $args );
 		} finally {
 			if ( $hook ) { remove_action( 'http_api_curl', $hook, 10 ); }
+			remove_filter( 'http_request_host_is_external', $host_hook, 10 );
+			remove_filter( 'http_allowed_safe_ports', $port_hook, 10 );
 		}
 		if ( is_wp_error( $response ) ) {
 			$this->last_node_error = array( 'code' => 'transport', 'url' => $node['url'] );
@@ -252,6 +262,7 @@ class Monero_Scanner {
 		// The lowest responding tip can delay settlement but cannot accelerate it.
 		$heights = array();
 		foreach ( $this->nodes as $node ) {
+			if ( $this->budget_exhausted() ) { break; }
 			$r = $this->node_rpc_get_one( $node, '/get_height' );
 			if ( $r && isset( $r['height'] ) && (int) $r['height'] > 0 ) { $heights[] = (int) $r['height']; }
 		}
@@ -269,12 +280,14 @@ class Monero_Scanner {
 		if ( ! in_array( strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ), array( 'http', 'https' ), true ) ) {
 			return null;
 		}
-		$raw = @file_get_contents( $url );
+		$ctx = stream_context_create( array( 'http' => array( 'timeout' => $this->request_timeout(), 'ignore_errors' => true ) ) );
+		$raw = @file_get_contents( $url, false, $ctx );
 		return $raw === false ? null : json_decode( $raw, true );
 	}
 
 	private function node_rpc_get( $path ) {
 		foreach ( $this->nodes as $node ) {
+			if ( $this->budget_exhausted() ) { break; }
 			$response = $this->node_rpc_get_one( $node, $path );
 			if ( null !== $response ) { return $response; }
 		}
@@ -502,9 +515,9 @@ class Monero_Scanner {
 	/** Scan the daemon transaction pool for committed outputs. */
 	public function scan_pool( $address, $view_key, $opts = array() ) {
 		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
-		$resp       = $this->node_rpc( '/get_transaction_pool', array() );
+		$resp       = $this->node_rpc( '/get_transaction_pool', (object) array() );
 		if ( ! is_array( $resp ) || ! isset( $resp['transactions'] ) || ! is_array( $resp['transactions'] ) ) {
-			return array();
+			return null;
 		}
 
 		$matches = array();

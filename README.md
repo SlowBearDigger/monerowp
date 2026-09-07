@@ -53,7 +53,7 @@ WordPress admin → Plugins → Add New → search “monero” → install **Mo
 | Redirect after payment | Optional URL; `{order_id}`, `{order_key}` (key only on same-site URLs) |
 | Monero address | Primary address only; network detected from it |
 | Private view key | 64 hex chars; `MONERO_GATEWAY_VIEW_KEY` in `wp-config.php` overrides the field |
-| Monero node(s) | Comma-separated `http(s)://` URLs; must match address network |
+| Monero node(s) | Your own or otherwise trusted `http(s)://` daemon URLs; must match address network |
 | Confirmations required | Default 1; `0` = mempool |
 | Underpayment tolerance (XMR) | Accept shortfall below 0.01 XMR |
 | Check setup | Node, network, and view-key check |

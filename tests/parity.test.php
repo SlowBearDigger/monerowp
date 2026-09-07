@@ -12,12 +12,14 @@ function esc_html( $text ) { return htmlspecialchars( (string) $text, ENT_QUOTES
 function esc_attr( $text ) { return esc_html( $text ); }
 function esc_attr__( $text ) { return $text; }
 function esc_url( $text ) { return esc_html( $text ); }
+function wp_parse_url( $url, $component = -1 ) { return parse_url( $url, $component ); }
 function plugins_url( $path ) { return 'https://shop.test/plugin/' . ltrim( $path, '/' ); }
 function shortcode_atts( $defaults, $atts ) { return array_merge( $defaults, $atts ); }
 function get_woocommerce_currency() { return 'USD'; }
 function is_wp_error( $value ) { return $value instanceof WP_Error; }
 function add_shortcode( $name, $callback ) { global $shortcodes; $shortcodes[ $name ] = $callback; }
 class WP_Error {}
+class WC_Payment_Gateway {}
 class WP_List_Table {
 	public function __construct( $args = array() ) {}
 }
@@ -26,6 +28,24 @@ class Parity_Rate_Gateway {
 	public $rate = 150.0;
 	public function get_rate_for_currency( $currency ) { return 'XMR' === $currency ? 1.0 : $this->rate; }
 }
+
+require_once __DIR__ . '/../includes/class-monero-util.php';
+ok_parity( 'XMR decimal conversion preserves every piconero above the float boundary', 9007199254740993 === Monero_Util::xmr_to_pico( '9007.199254740993' ) );
+ok_parity( 'same-origin requires the same scheme and effective port', Monero_Util::same_origin( '/thank-you', 'https://shop.test' ) && Monero_Util::same_origin( 'https://shop.test/order', 'https://shop.test' ) && ! Monero_Util::same_origin( 'http://shop.test/order', 'https://shop.test' ) && ! Monero_Util::same_origin( 'https://shop.test:444/order', 'https://shop.test' ) && ! Monero_Util::same_origin( 'javascript:alert(1)', 'https://shop.test' ) );
+$mempool = array( 'txid' => 'mempool-tx', 'amount_atomic' => '100', 'confirmations' => 0, 'in_pool' => true, 'locked' => false, 'double_spend_seen' => false, 'out_key' => 'out', 'commitment_ok' => true );
+$zero_conf = Monero_Util::summarize_payments( array( $mempool ), '100', '0', 0 );
+ok_parity( 'zero-conf settles a committed conflict-free mempool payment', true === $zero_conf['paid'] && 'paid' === $zero_conf['status'] );
+$mempool['double_spend_seen'] = true;
+ok_parity( 'zero-conf still rejects a reported mempool conflict', false === Monero_Util::summarize_payments( array( $mempool ), '100', '0', 0 )['paid'] );
+
+require_once __DIR__ . '/../includes/class-wc-gateway-monero.php';
+$legacy = WC_Gateway_Monero::migrate_legacy_settings( array(
+	'monero_address' => 'legacy-address',
+	'viewkey'        => 'legacy-view-key',
+	'confirms'       => '5',
+	'valid_time'     => '3600',
+) );
+ok_parity( '3.x settings migrate without deleting rollback data', 'legacy-address' === $legacy['xmr_address'] && 'legacy-view-key' === $legacy['view_key'] && '5' === $legacy['min_confirmations'] && '1' === $legacy['expiry_hours'] && isset( $legacy['monero_address'] ) );
 
 require_once __DIR__ . '/../includes/class-monero-shortcodes.php';
 $shortcode_service = new Monero_Gateway_Shortcodes( new Parity_Rate_Gateway() );

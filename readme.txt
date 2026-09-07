@@ -51,7 +51,7 @@ WooCommerce → Settings → Payments → Monero.
 * Redirect after payment (URL) – optional; `{order_id}` and `{order_key}` placeholders (`{order_key}` only for same-site URLs)
 * Monero address – standard primary address (mainnet `4…`, stagenet/testnet as applicable). Subaddresses and integrated addresses are not accepted here. Network is detected from this address.
 * Private view key – 64 hex characters for that address. Optional: define `MONERO_GATEWAY_VIEW_KEY` in `wp-config.php` (takes precedence over the saved field)
-* Monero node(s) – comma-separated `http://` or `https://` daemon URLs; must match the address network
+* Monero node(s) – your own or otherwise trusted `http://` or `https://` daemon URLs; must match the address network
 * Confirmations required – default 1; 0 accepts mempool detection
 * Underpayment tolerance (XMR) – accept shortfalls up to this amount (below 0.01 XMR)
 * Check setup – admin button for node reachability, network match, and view-key check

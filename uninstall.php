@@ -38,7 +38,6 @@ function monero_gateway_uninstall_site() {
 		'monero_gateway_rate_',
 		'monero_gateway_node_nettype_',
 		'monero_gateway_rl_s_',
-		'monero_gateway_scancd_',
 	);
 	$transient_patterns = array();
 	foreach ( $transient_prefixes as $prefix ) {
@@ -62,6 +61,7 @@ function monero_gateway_uninstall_site() {
 
 	wp_clear_scheduled_hook( 'monero_gateway_expire_orders' );
 	wp_clear_scheduled_hook( 'monero_gateway_reconcile' );
+	wp_clear_scheduled_hook( 'monero_update_event' );
 }
 
 if ( is_multisite() ) {

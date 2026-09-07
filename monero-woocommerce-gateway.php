@@ -73,6 +73,7 @@ register_activation_hook( __FILE__, function () {
 register_deactivation_hook( __FILE__, function () {
 	wp_clear_scheduled_hook( 'monero_gateway_expire_orders' );
 	wp_clear_scheduled_hook( 'monero_gateway_reconcile' );
+	wp_clear_scheduled_hook( 'monero_update_event' );
 } );
 
 add_action( 'plugins_loaded', 'monero_gateway_wc_init' );
@@ -93,12 +94,27 @@ function monero_gateway_wc_init() {
 	require_once __DIR__ . '/includes/class-monero-node-fields.php';
 	require_once __DIR__ . '/includes/class-monero-scanner.php';
 	require_once __DIR__ . '/includes/class-wc-gateway-monero.php';
+	$monero_settings = get_option( 'woocommerce_monero_gateway_settings', array() );
+	$migrated_settings = WC_Gateway_Monero::migrate_legacy_settings( $monero_settings );
+	if ( $migrated_settings !== $monero_settings ) {
+		update_option( 'woocommerce_monero_gateway_settings', $migrated_settings );
+		$monero_settings = $migrated_settings;
+	}
+	if ( wp_next_scheduled( 'monero_update_event' ) ) { wp_clear_scheduled_hook( 'monero_update_event' ); }
+	$configured_nodes = Monero_Node_Config::normalize_list( $monero_settings['node_configs'] ?? ( $monero_settings['nodes'] ?? array() ) );
+	if ( is_admin() && isset( $monero_settings['confirm_type'] ) && ! $configured_nodes ) {
+		add_action( 'admin_notices', function () use ( $monero_settings ) {
+			$message = 'monero-wallet-rpc' === (string) $monero_settings['confirm_type']
+				? __( 'The legacy wallet RPC backend is no longer active. Configure your own or another trusted monerod node before accepting new orders. Existing pending 3.x orders are not migrated automatically.', 'monero_gateway' )
+				: __( 'Monero 3.x settings were migrated. Configure your own or another trusted monerod node before accepting new orders. Existing pending 3.x orders are not migrated automatically.', 'monero_gateway' );
+			echo '<div class="notice notice-warning"><p>' . esc_html( $message ) . '</p></div>';
+		} );
+	}
 	require_once __DIR__ . '/includes/class-monero-shortcodes.php';
 	add_action( 'init', function () {
 		( new Monero_Gateway_Shortcodes( new WC_Gateway_Monero( false ) ) )->register();
 	} );
 	require_once __DIR__ . '/includes/class-monero-discount.php';
-	$monero_settings = get_option( 'woocommerce_monero_gateway_settings', array() );
 	$monero_discount = new Monero_Gateway_Discount( $monero_settings['discount'] ?? 0 );
 	$monero_discount->register();
 	$register_discount_update = function () use ( $monero_discount ) {

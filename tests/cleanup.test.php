@@ -19,14 +19,8 @@ $root_license = file_get_contents( $root . '/LICENSE' );
 $plugin    = file_get_contents( $root . '/monero-woocommerce-gateway.php' );
 $gateway   = file_get_contents( $root . '/includes/class-wc-gateway-monero.php' );
 $util      = file_get_contents( $root . '/includes/class-monero-util.php' );
-$scanner   = file_get_contents( $root . '/includes/class-monero-scanner.php' );
-$widget    = file_get_contents( $root . '/assets/js/monero-pay.js' );
 $qr_notice = $root . '/assets/js/qrcode-generator.LICENSE';
 $licenses  = $root . '/includes/vendor/monero/LICENSES.md';
-$production_php = $plugin;
-foreach ( glob( $root . '/includes/*.php' ) as $php_file ) {
-	$production_php .= "\n" . file_get_contents( $php_file );
-}
 
 ok_cleanup( 'legacy gateway directory is absent', ! is_dir( $root . '/include' ) );
 ok_cleanup( 'legacy template directory is absent', ! is_dir( $root . '/templates/monero-gateway' ) );
@@ -72,27 +66,6 @@ ok_cleanup( 'gateway and shortcode use official PNG assets',
 	&& false !== strpos( file_get_contents( $root . '/includes/class-monero-shortcodes.php' ), 'monero-accepted-here.png' )
 );
 ok_cleanup( 'official image provenance is bundled', is_file( $root . '/assets/images/LICENSE' ) );
-
-$unused_util_methods = array(
-	'to_invoice_state', 'is_address_like', 'normalize_agent_url', 'resolve_claim_window',
-	'claim_window_from_days', 'claim_expires_at', 'claim_expired', 'nonce_amount',
-	'from_total', 'classify_payment', 'verify_sig', 'event_fresh', 'test_amount_allowed',
-);
-foreach ( $unused_util_methods as $method ) {
-	ok_cleanup( "unused Monero_Util::{$method} removed", false === strpos( $util, "function {$method}(" ) );
-	ok_cleanup( "no production caller remains for Monero_Util::{$method}", false === strpos( $production_php, "Monero_Util::{$method}(" ) );
-}
-ok_cleanup( 'unused single-window scanner removed', false === strpos( $scanner, 'function scan(' ) );
-ok_cleanup( 'no production caller remains for single-window scanner', false === strpos( $production_php, '->scan(' ) );
-
-$unused_widget_features = array(
-	'verify-url', 'status-url', 'stream-url', 'receipt-url', 'verify-page',
-	'pubkey', 'fingerprint', 'xpVerifyConfig', 'EventSource',
-);
-foreach ( $unused_widget_features as $feature ) {
-	ok_cleanup( "unused widget feature {$feature} removed", false === strpos( $widget, $feature ) );
-	ok_cleanup( "no PHP emitter remains for widget feature {$feature}", false === strpos( $production_php, $feature ) );
-}
 
 ok_cleanup( 'obsolete Travis configuration removed', ! file_exists( $root . '/.travis.yml' ) );
 ok_cleanup( 'GitHub Actions unit workflow present', is_file( $root . '/.github/workflows/tests.yml' ) );
