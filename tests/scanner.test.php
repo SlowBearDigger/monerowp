@@ -69,6 +69,9 @@ $BUYER_PRIMARY = '5BEiTonHrFFgGSRAQTknCsEU9jRtGXEVBbv9bZSHCybmUT6aoA2V9M98rLFW2r
 $sub = $s->subaddress( 0, 7, $VIEW, $BUYER_PRIMARY );
 ok( 'subaddress(0,7) derives the SAME address monero-ts made', is_array( $sub ) && $sub['address'] === $VECTORS['subaddress']['address'], $sub['address'] ?? 'null' );
 ok( 'subaddress(0,0) === the primary address', $s->subaddress( 0, 0, $VIEW, $BUYER_PRIMARY )['address'] === $BUYER_PRIMARY );
+$other_order = $s->subaddress( 0, 8, $VIEW, $BUYER_PRIMARY );
+$other_result = $s->verify_payment( $VECTORS['subaddress']['txid'], $other_order['address'], $VIEW, array( 'tip' => $tip, 'require_commitment' => true ) );
+ok( 'one payment cannot settle another same-value order', empty( $other_result['found'] ) );
 
 // Discover a payment by scanning its block without a known txid.
 $BLOCK = 2144642; // the block c7622a43… landed in

@@ -12,6 +12,36 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 	const REORG_LOOKBACK = 3;
 	private $scanner_instance;
 
+	private static function rate_feed_is_stale( $last_success, $minutes, $now = null ) {
+		$minutes = max( 1, min( 10080, (int) $minutes ) );
+		$now     = null === $now ? time() : (int) $now;
+		return (int) $last_success <= $now - $minutes * 60;
+	}
+
+	private static function last_rate_within_grace( $record, $minutes, $now = null ) {
+		if ( ! is_array( $record ) || ! isset( $record['rate'], $record['at'] ) || ! is_numeric( $record['rate'] ) || (float) $record['rate'] <= 0 ) {
+			return null;
+		}
+		return self::rate_feed_is_stale( $record['at'], $minutes, $now ) ? null : (float) $record['rate'];
+	}
+
+	private static function rate_unavailable_message( $message ) {
+		$message = trim( (string) $message );
+		return '' !== $message ? $message : __( 'Monero payments are temporarily unavailable because the exchange rate could not be refreshed.', 'monero_gateway' );
+	}
+
+	private static function no_script_fallback_html( $refresh_url ) {
+		return '<noscript><meta http-equiv="refresh" content="' . esc_attr( '60;url=' . $refresh_url ) . '"><p>'
+			. esc_html__( 'JavaScript is off. Payment status refreshes every 60 seconds.', 'monero_gateway' ) . ' <a href="' . esc_url( $refresh_url ) . '">'
+			. esc_html__( 'Check payment status', 'monero_gateway' ) . '</a></p></noscript>';
+	}
+
+	public static function add_xmr_currency( $currencies ) {
+		$currencies = is_array( $currencies ) ? $currencies : array();
+		$currencies['XMR'] = __( 'Monero (XMR)', 'monero_gateway' );
+		return $currencies;
+	}
+
 	/** Map 3.x settings without removing the values needed for rollback. */
 	public static function migrate_legacy_settings( $settings ) {
 		$settings = is_array( $settings ) ? $settings : array();
@@ -47,6 +77,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		add_action( 'woocommerce_thankyou_' . $this->id, array( $this, 'render_payment_panel' ) );
 		add_action( 'woocommerce_receipt_' . $this->id, array( $this, 'render_payment_panel' ) );
 		add_action( 'woocommerce_view_order', array( $this, 'render_payment_panel' ) );
+		add_action( 'woocommerce_before_checkout_form', array( $this, 'maybe_show_rate_unavailable_notice' ) );
 		add_action( 'woocommerce_email_before_order_table', array( $this, 'email_instructions' ), 10, 3 );
 		add_action( 'woocommerce_checkout_create_order', array( $this, 'strip_pii' ), 20, 2 );
 		add_action( 'woocommerce_store_api_checkout_update_order_from_request', array( $this, 'strip_pii' ), 20, 2 );
@@ -165,6 +196,15 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			return $this->get_option( $key, '0' );
 		}
 		return (string) Monero_Gateway_Discount::normalize_percentage( $value );
+	}
+
+	public function validate_rate_stale_minutes_field( $key, $value ) {
+		$minutes = filter_var( $value, FILTER_VALIDATE_INT );
+		if ( false === $minutes || $minutes < 1 || $minutes > 10080 ) {
+			WC_Admin_Settings::add_error( __( 'The price-feed grace period must be a whole number from 1 to 10080 minutes.', 'monero_gateway' ) );
+			return $this->get_option( $key, '30' );
+		}
+		return (string) $minutes;
 	}
 
 	public function generate_node_list_html( $key, $data ) {
@@ -308,6 +348,19 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				'type'        => 'text',
 				'placeholder' => '150',
 				'description' => __( 'Price of 1 XMR in the store currency.', 'monero_gateway' ),
+			),
+			'rate_stale_minutes' => array(
+				'title'             => __( 'Price-feed outage grace period (minutes)', 'monero_gateway' ),
+				'type'              => 'number',
+				'default'           => '30',
+				'description'       => __( 'Keep using the last verified rate for this long. Afterward Monero is removed from checkout until the price feed recovers.', 'monero_gateway' ),
+				'custom_attributes' => array( 'min' => '1', 'max' => '10080', 'step' => '1' ),
+			),
+			'rate_stale_message' => array(
+				'title'       => __( 'Price-feed outage message', 'monero_gateway' ),
+				'type'        => 'text',
+				'default'     => __( 'Monero payments are temporarily unavailable because the exchange rate could not be refreshed.', 'monero_gateway' ),
+				'description' => __( 'Shown at checkout after the grace period expires.', 'monero_gateway' ),
 			),
 			'expiry_hours' => array(
 				'title'             => __( 'Auto-cancel after (hours)', 'monero_gateway' ),
@@ -645,15 +698,34 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		if ( false !== get_transient( $key ) ) {
 			return false;
 		}
-		$health_key = 'monero_gateway_rate_health_' . md5( $source . "\0" . $currency . "\0" . (string) $this->get_option( 'custom_rate_url' ) );
+		$health_key = 'monero_gateway_rate_health_' . $this->rate_record_id( $source, $currency );
 		$health     = get_transient( $health_key );
-		if ( false !== $health ) {
-			return 'ok' !== $health;
+		if ( 'invalid' !== $health ) {
+			$rate = 'custom' === $source ? $this->custom_rate( $currency ) : $this->xmr_rate( $currency );
+			if ( ! is_wp_error( $rate ) && (float) $rate > 0 ) {
+				set_transient( $health_key, 'ok', 5 * MINUTE_IN_SECONDS );
+				return false;
+			}
+			set_transient( $health_key, 'invalid', MINUTE_IN_SECONDS );
 		}
-		$rate   = 'custom' === $source ? $this->custom_rate( $currency ) : $this->xmr_rate( $currency );
-		$health = ( ! is_wp_error( $rate ) && (float) $rate > 0 ) || (int) get_option( 'monero_gateway_rate_ok_at', 0 ) >= time() - 30 * MINUTE_IN_SECONDS ? 'ok' : 'invalid';
-		set_transient( $health_key, $health, 'ok' === $health ? 5 * MINUTE_IN_SECONDS : MINUTE_IN_SECONDS );
-		return 'ok' !== $health;
+		$record = get_option( 'monero_gateway_last_rate_' . $this->rate_record_id( $source, $currency ), array() );
+		return null === self::last_rate_within_grace( $record, $this->get_option( 'rate_stale_minutes', '30' ) );
+	}
+
+	private function rate_record_id( $source, $currency ) {
+		$custom_url = 'custom' === $source ? (string) $this->get_option( 'custom_rate_url' ) : '';
+		return md5( $source . "\0" . strtoupper( (string) $currency ) . "\0" . $custom_url );
+	}
+
+	private function remember_live_rate( $source, $currency, $rate ) {
+		update_option( 'monero_gateway_last_rate_' . $this->rate_record_id( $source, $currency ), array( 'rate' => (string) $rate, 'at' => time() ), false );
+		update_option( 'monero_gateway_rate_ok_at', time(), false );
+	}
+
+	public function maybe_show_rate_unavailable_notice() {
+		if ( 'yes' === $this->enabled && $this->live_rate_stale() ) {
+			wc_print_notice( self::rate_unavailable_message( $this->get_option( 'rate_stale_message' ) ), 'notice' );
+		}
 	}
 
 	private function detect_network() {
@@ -714,6 +786,12 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			$this->log( 'price feed (' . $source . ') unavailable — using fixed fallback ' . $fixed, 'warning' );
 			return $fixed;
 		}
+		$record = get_option( 'monero_gateway_last_rate_' . $this->rate_record_id( $source, $currency ), array() );
+		$stale  = self::last_rate_within_grace( $record, $this->get_option( 'rate_stale_minutes', '30' ) );
+		if ( null !== $stale ) {
+			$this->log( 'price feed (' . $source . ') unavailable: using last verified rate ' . $stale, 'warning' );
+			return $stale;
+		}
 		return is_wp_error( $live ) ? $live : new WP_Error( 'monero_gateway_rate', __( 'Could not get an XMR price and no fixed fallback is set.', 'monero_gateway' ) );
 	}
 
@@ -738,8 +816,8 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			return new WP_Error( 'monero_gateway_rate', __( 'The custom price source did not return a valid rate at that path.', 'monero_gateway' ) );
 		}
 		$rate = (float) $rate;
-		set_transient( 'monero_gateway_rate_custom_' . $vs, $rate, 180 );
-		update_option( 'monero_gateway_rate_ok_at', time(), false );
+		set_transient( 'monero_gateway_rate_custom_' . $vs, $rate, MINUTE_IN_SECONDS );
+		$this->remember_live_rate( 'custom', $currency, $rate );
 		return $rate;
 	}
 
@@ -779,8 +857,8 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			return new WP_Error( 'monero_gateway_rate', sprintf( __( 'No XMR price for %s.', 'monero_gateway' ), $currency ) );
 		}
 		$rate = (float) $body['monero'][ $vs ];
-		set_transient( $key, $rate, 180 );
-		update_option( 'monero_gateway_rate_ok_at', time(), false );
+		set_transient( $key, $rate, MINUTE_IN_SECONDS );
+		$this->remember_live_rate( 'coingecko', $currency, $rate );
 		return $rate;
 	}
 
@@ -834,6 +912,10 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				$order->save();
 			}
 
+			if ( $this->live_rate_stale() ) {
+				wc_add_notice( self::rate_unavailable_message( $this->get_option( 'rate_stale_message' ) ), 'error' );
+				return array( 'result' => 'failure' );
+			}
 			$amount = $this->get_xmr_amount( $order );
 			if ( is_wp_error( $amount ) ) {
 				wc_add_notice( $amount->get_error_message(), 'error' );
@@ -928,6 +1010,11 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		if ( ! $order || $order->get_payment_method() !== $this->id ) {
 			return;
 		}
+		if ( ! $order->is_paid() && 'watch' === (string) $order->get_meta( '_monero_mode' ) ) {
+			$this->scan_order( $order );
+			$order = wc_get_order( $order_id );
+			if ( ! $order ) { return; }
+		}
 		$address = (string) $order->get_meta( '_monero_address' );
 		$amounts = $this->payment_amounts( $order );
 		$amount  = $amounts['pay'];
@@ -995,7 +1082,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 							<?php endif; ?>
 							<p><code style="word-break:break-all;user-select:all"><?php echo esc_html( $address ); ?></code></p>
 							<p><a href="<?php echo esc_attr( $pay_uri ); ?>"><?php esc_html_e( 'Open in Monero wallet', 'monero_gateway' ); ?></a></p>
-							<noscript><p><?php esc_html_e( 'JavaScript is off — refresh this page to update the payment status.', 'monero_gateway' ); ?></p></noscript>
+							<?php echo self::no_script_fallback_html( $this->get_return_url( $order ) ); // phpcs:ignore WordPress.Security.EscapeOutput.OutputNotEscaped -- helper escapes the URL and text. ?>
 						</div>
 					</monero-pay>
 				<?php endif; ?>

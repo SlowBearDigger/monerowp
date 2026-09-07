@@ -60,6 +60,8 @@ WordPress admin → Plugins → Add New → search “monero” → install **Mo
 | Price source | CoinGecko / custom URL (+ JSON path) / fixed rate; ignored if store currency is XMR |
 | CoinGecko API key | Optional |
 | Fixed rate / fallback | Used as fixed source or when live feed fails |
+| Price-feed outage grace period | Reuse the last verified rate for 1 to 10080 minutes, then remove Monero from checkout |
+| Price-feed outage message | Merchant-defined checkout notice shown when the grace period expires |
 | Auto-cancel after (hours) | `0` disables expiry |
 | Debug log | WooCommerce logs |
 

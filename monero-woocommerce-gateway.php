@@ -134,10 +134,7 @@ function monero_gateway_wc_init() {
 	}
 
 	// Native XMR store currency (cart total is the XMR amount — no price feed).
-	add_filter( 'woocommerce_currencies', function ( $currencies ) {
-		$currencies['XMR'] = __( 'Monero (XMR)', 'monero_gateway' );
-		return $currencies;
-	} );
+	add_filter( 'woocommerce_currencies', array( 'WC_Gateway_Monero', 'add_xmr_currency' ) );
 	add_filter( 'woocommerce_currency_symbol', function ( $symbol, $currency ) {
 		return 'XMR' === $currency ? 'ɱ' : $symbol;
 	}, 10, 2 );

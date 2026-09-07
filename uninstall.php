@@ -21,12 +21,13 @@ function monero_gateway_uninstall_site() {
 
 	global $wpdb;
 
-	// Per-order scan/payment locks.
+	// Per-order scan/payment locks and saved price-feed state.
 	// phpcs:ignore WordPress.DB.DirectDatabaseQuery.DirectQuery, WordPress.DB.DirectDatabaseQuery.NoCaching
 	$options = $wpdb->get_col(
 		$wpdb->prepare(
-			"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s",
-			$wpdb->esc_like( 'monero_gateway_lock_' ) . '%'
+			"SELECT option_name FROM {$wpdb->options} WHERE option_name LIKE %s OR option_name LIKE %s",
+			$wpdb->esc_like( 'monero_gateway_lock_' ) . '%',
+			$wpdb->esc_like( 'monero_gateway_last_rate_' ) . '%'
 		)
 	);
 	foreach ( (array) $options as $name ) {

@@ -56,6 +56,7 @@ WooCommerce → Settings → Payments → Monero.
 * Underpayment tolerance (XMR) – accept shortfalls up to this amount (below 0.01 XMR)
 * Check setup – admin button for node reachability, network match, and view-key check
 * Price source – CoinGecko, custom URL (+ JSON path), or fixed rate; ignored when store currency is XMR. Optional CoinGecko API key; fixed rate also used as fallback when a live feed fails
+* Price-feed outage handling – reuse the last verified rate for a configurable grace period, then remove Monero from checkout and show the merchant-defined outage message
 * Auto-cancel after (hours) – cancel unpaid orders after this period; 0 disables expiry
 * Debug log – write scan activity to WooCommerce logs
 
