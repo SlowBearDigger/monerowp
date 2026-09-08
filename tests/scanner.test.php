@@ -9,7 +9,11 @@ require_once __DIR__ . '/../includes/class-monero-scanner.php';
 $pass = 0; $fail = 0;
 function ok( $n, $c, $x = '' ) { global $pass, $fail; if ( $c ) { $pass++; echo "PASS  $n\n"; } else { $fail++; echo "FAIL  $n" . ( $x !== '' ? "  — $x" : '' ) . "\n"; } }
 
-$NODE = getenv( 'XMR_NODE' ) ?: 'http://node2.monerodevs.org:38089';
+$NODE = getenv( 'XMR_NODE' );
+if ( ! $NODE ) {
+	echo "SKIP — set XMR_NODE to an HTTPS or loopback stagenet daemon URL\n";
+	exit( 0 );
+}
 // Disposable stagenet view-only key; override with XMR_TEST_VIEW_KEY.
 $VIEW = getenv( 'XMR_TEST_VIEW_KEY' ) ?: '3b6765f2072e11438aaa22ae9168adf304c414d8da5de504dcdb46e397a6f604';
 $VECTORS = array(

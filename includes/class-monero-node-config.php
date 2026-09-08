@@ -91,8 +91,17 @@ final class Monero_Node_Config {
 		if ( ! in_array( strtolower( $parts['scheme'] ), array( 'http', 'https' ), true ) ) {
 			return null;
 		}
+		if ( 'http' === strtolower( $parts['scheme'] ) && ! self::is_loopback_host( $parts['host'] ) ) {
+			return null;
+		}
 		$clean = function_exists( 'esc_url_raw' ) ? esc_url_raw( $url ) : $url;
 		return rtrim( $clean, '/' );
+	}
+
+	private static function is_loopback_host( $host ) {
+		$host = strtolower( trim( (string) $host, '[]' ) );
+		return 'localhost' === $host || '::1' === $host
+			|| ( false !== filter_var( $host, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4 ) && 0 === strpos( $host, '127.' ) );
 	}
 
 	private static function same( $left, $right ) {

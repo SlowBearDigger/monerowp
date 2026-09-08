@@ -18,6 +18,9 @@ $root      = dirname( __DIR__ );
 $root_license = file_get_contents( $root . '/LICENSE' );
 $plugin    = file_get_contents( $root . '/monero-woocommerce-gateway.php' );
 $gateway   = file_get_contents( $root . '/includes/class-wc-gateway-monero.php' );
+$scan_start = strpos( $gateway, 'private function scan_order' );
+$scan_end   = strpos( $gateway, '/** Complete an order once', $scan_start );
+$scan       = substr( $gateway, $scan_start, $scan_end - $scan_start );
 $util      = file_get_contents( $root . '/includes/class-monero-util.php' );
 $qr_notice = $root . '/assets/js/qrcode-generator.LICENSE';
 $licenses  = $root . '/includes/vendor/monero/LICENSES.md';
@@ -69,7 +72,15 @@ ok_cleanup( 'official image provenance is bundled', is_file( $root . '/assets/im
 
 ok_cleanup( 'obsolete Travis configuration removed', ! file_exists( $root . '/.travis.yml' ) );
 ok_cleanup( 'GitHub Actions unit workflow present', is_file( $root . '/.github/workflows/tests.yml' ) );
+$workflow = is_file( $root . '/.github/workflows/tests.yml' ) ? file_get_contents( $root . '/.github/workflows/tests.yml' ) : '';
+ok_cleanup( 'GitHub Actions runs the JavaScript behavior regression', false !== strpos( $workflow, 'node tests/widget-clipboard.test.js' ) );
 ok_cleanup( 'current bootstrap still loads active gateway', false !== strpos( $plugin, "includes/class-wc-gateway-monero.php" ) );
+ok_cleanup( 'scan lock outlives the operation budget', false !== strpos( $scan, 'max( 20, (int) ceil( $time_budget ) + 5 )' ) );
+$incomplete_start = strpos( $scan, 'if ( ! $scan_complete )' );
+$matches_start    = strpos( $scan, '$matches = array_merge', $incomplete_start );
+$incomplete       = substr( $scan, $incomplete_start, $matches_start - $incomplete_start );
+ok_cleanup( 'incomplete scans keep the lock through settlement updates', false === strpos( $incomplete, 'release_lock' ) );
+ok_cleanup( 'every scan exit releases its lock', 5 === substr_count( $scan, '$this->release_lock( $cooldown );' ) );
 
 list( $passed, $failed ) = $GLOBALS['cleanup_counts'];
 echo "\n" . ( $failed ? 'FAIL' : 'ALL GREEN' ) . " — {$passed} passed, {$failed} failed\n";

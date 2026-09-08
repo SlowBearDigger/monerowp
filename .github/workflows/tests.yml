@@ -32,6 +32,9 @@ jobs:
       - name: Check JavaScript syntax
         run: find assets/js -name '*.js' -print0 | xargs -0 -n1 node --check
 
+      - name: Run JavaScript behavior test
+        run: node tests/widget-clipboard.test.js
+
       - name: Run offline tests
         run: |
           # scanner.test.php uses a live stagenet RPC endpoint.

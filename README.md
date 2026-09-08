@@ -9,7 +9,7 @@ WooCommerce payment gateway for Monero (XMR). The merchant sets a primary addres
 
 ## Features
 
-* Watch-mode verification against monerod daemon RPC (HTTP/HTTPS), with comma-separated node failover
+* Watch-mode verification against monerod daemon RPC, with ordered node failover
 * Per-order subaddress derivation; amount locked at checkout
 * Configurable confirmations; optional order expiry (hours); partial-payment top-up; overpayment recorded on the order
 * Price from CoinGecko, custom URL, fixed rate, or store currency set to XMR
@@ -24,7 +24,7 @@ WooCommerce payment gateway for Monero (XMR). The merchant sets a primary addres
 * WordPress 6.2+, PHP 8.0+, WooCommerce
 * PHP extensions **GMP**, **BCMath**, and **Mbstring** (all required; gateway hidden until they are enabled)
 * Monero standard (primary) address and matching private view key
-* monerod daemon RPC reachable from the WordPress host (same network as the address)
+* monerod daemon RPC reachable from the WordPress host (same network as the address); HTTPS is required except for loopback URLs
 
 ## Setup
 
@@ -53,7 +53,7 @@ WordPress admin → Plugins → Add New → search “monero” → install **Mo
 | Redirect after payment | Optional URL; `{order_id}`, `{order_key}` (key only on same-site URLs) |
 | Monero address | Primary address only; network detected from it |
 | Private view key | 64 hex chars; `MONERO_GATEWAY_VIEW_KEY` in `wp-config.php` overrides the field |
-| Monero node(s) | Your own or otherwise trusted `http(s)://` daemon URLs; must match address network |
+| Monero node(s) | Your own or otherwise trusted daemon URLs; HTTPS is required except for `localhost`, `127.0.0.0/8`, and `::1`; all nodes must match the address network |
 | Confirmations required | Default 1; `0` = mempool |
 | Underpayment tolerance (XMR) | Accept shortfall below 0.01 XMR |
 | Check setup | Node, network, and view-key check |

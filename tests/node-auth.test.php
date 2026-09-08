@@ -6,6 +6,7 @@ $fail = 0;
 $requests = array();
 $responses = array();
 $filters = array();
+$delays = array();
 function ok_auth( $name, $condition ) { global $pass, $fail; $condition ? $pass++ : $fail++; echo ( $condition ? 'PASS  ' : 'FAIL  ' ) . $name . "\n"; }
 function wp_parse_url( $url, $component = -1 ) { return parse_url( $url, $component ); }
 function esc_url_raw( $url ) { return $url; }
@@ -32,9 +33,14 @@ function apply_filters( $tag, $value ) {
 function wp_safe_remote_get( $url, $args ) { return node_auth_request( 'GET', $url, $args ); }
 function wp_safe_remote_post( $url, $args ) { return node_auth_request( 'POST', $url, $args ); }
 function node_auth_request( $method, $url, $args ) {
-	global $requests, $responses;
+	global $requests, $responses, $delays;
 	$requests[] = compact( 'method', 'url', 'args' );
 	$host = (string) parse_url( $url, PHP_URL_HOST );
+	$delay = isset( $delays[ $host ] ) ? (float) $delays[ $host ] : 0.0;
+	if ( $delay > 0 ) {
+		usleep( (int) ( min( $delay, (float) $args['timeout'] ) * 1000000 ) );
+		if ( $delay > (float) $args['timeout'] ) { return new WP_Error(); }
+	}
 	if ( in_array( $host, array( '127.0.0.1', 'localhost' ), true ) && ! apply_filters( 'http_request_host_is_external', false, $host, $url ) ) {
 		return new WP_Error();
 	}
@@ -123,6 +129,24 @@ $budgeted = new Monero_Scanner( 'https://budget.test', 'mainnet', 20 );
 $budgeted->set_time_budget( 0.5 );
 $budgeted->node_info();
 ok_auth( 'the overall scan budget clamps each RPC timeout', $requests[0]['args']['timeout'] > 0 && $requests[0]['args']['timeout'] <= 0.5 );
+
+$requests = array();
+$responses = array( array( 'code' => 200, 'body' => json_encode( array( 'height' => 444, 'nettype' => 'mainnet' ) ) ) );
+$delays = array( 'slow.test' => 0.2 );
+$budgeted = new Monero_Scanner( array( 'https://slow.test', 'https://healthy.test' ), 'mainnet', 20 );
+$budgeted->set_time_budget( 0.12 );
+$height = $budgeted->tip_height();
+ok_auth( 'a slow first node leaves time for the healthy fallback', 444 === $height && 2 === count( $requests ) );
+
+$requests = array();
+$responses = array();
+$delays = array( 'slow.test' => 0.2, 'also-slow.test' => 0.2 );
+$budgeted = new Monero_Scanner( array( 'https://slow.test', 'https://also-slow.test' ), 'mainnet', 20 );
+$budgeted->set_time_budget( 0.12 );
+$started = microtime( true );
+$height = $budgeted->tip_height();
+$elapsed = microtime( true ) - $started;
+ok_auth( 'tip lookup reserves part of the scan budget', null === $height && $elapsed < 0.1 );
 
 echo "\n" . ( $fail ? 'FAILED' : 'ALL GREEN' ) . " — $pass passed, $fail failed\n";
 exit( $fail ? 1 : 0 );

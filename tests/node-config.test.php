@@ -22,6 +22,10 @@ require_once __DIR__ . '/../includes/class-monero-node-fields.php';
 $legacy = Monero_Node_Config::normalize_list( 'https://one.test:18081, https://two.test:18081' );
 ok_node( 'legacy nodes migrate in order', array( 'https://one.test:18081', 'https://two.test:18081' ) === array_column( $legacy, 'url' ) );
 ok_node( 'legacy nodes have no auth', array( 'none', 'none' ) === array_column( $legacy, 'auth' ) );
+ok_node( 'remote plaintext node is rejected', is_wp_error( Monero_Node_Config::sanitize_submission( array( array( 'url' => 'http://node.test:18081' ) ), array() ) ) );
+ok_node( 'loopback plaintext node is allowed', 'http://127.0.0.1:18081' === Monero_Node_Config::normalize_list( 'http://127.0.0.1:18081' )[0]['url'] );
+ok_node( 'localhost plaintext node is allowed', 'http://localhost:18081' === Monero_Node_Config::normalize_list( 'http://localhost:18081' )[0]['url'] );
+ok_node( 'a hostname beginning with 127 is not loopback', is_wp_error( Monero_Node_Config::sanitize_submission( array( array( 'url' => 'http://127.evil.test:18081' ) ), array() ) ) );
 
 $saved = array( array( 'url' => 'https://private.test:18081', 'auth' => 'digest', 'username' => 'merchant', 'password' => 'secret' ) );
 $submitted = array( array( 'url' => 'https://private.test:18081', 'auth' => 'digest', 'username' => 'merchant', 'password' => '' ) );

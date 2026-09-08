@@ -291,7 +291,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				'title'       => __( 'Monero node(s)', 'monero_gateway' ),
 				'type'        => 'node_list',
 				'default'     => '',
-				'description' => __( 'Add your own or otherwise trusted nodes in priority order. Requests fail over to the next node; all nodes must match the address network.', 'monero_gateway' ),
+				'description' => __( 'Add your own or otherwise trusted nodes in priority order. HTTPS is required except for loopback URLs. Requests fail over to the next node; all nodes must match the address network.', 'monero_gateway' ),
 			),
 			'min_confirmations' => array(
 				'title'             => __( 'Confirmations required', 'monero_gateway' ),
@@ -1315,13 +1315,15 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 
 		$order_id = $order->get_id();
 		$cooldown = 'scan_' . $order_id;
-		if ( ! $this->acquire_lock( $cooldown, 20 ) ) {
+		$scan_lock_ttl = max( 20, (int) ceil( $time_budget ) + 5 );
+		if ( ! $this->acquire_lock( $cooldown, $scan_lock_ttl ) ) {
 			return 'busy';
 		}
 
 		$address = (string) $order->get_meta( '_monero_address' );
 		$view    = $this->view_key();
 		if ( '' === $address || '' === $view ) {
+			$this->release_lock( $cooldown );
 			return 'skip';
 		}
 		$scanner = $this->scanner();
@@ -1400,7 +1402,6 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		$scan_reachable = $scan_complete || $scanned_to >= $from;
 		if ( ! $scan_complete ) {
 			$this->log( 'scan stopped early for order #' . $order_id . ' at block ' . $scanned_to . ' before ' . $scan_target . ' — node RPC unavailable or time budget exhausted', 'warning' );
-			$this->release_lock( $cooldown );
 		}
 		$matches = array_merge( isset( $scan['matches'] ) && is_array( $scan['matches'] ) ? $scan['matches'] : array(), $pool_matches );
 		foreach ( $matches as $match ) {
@@ -1448,17 +1449,21 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		$order->save();
 
 		if ( $summary['paid'] ) {
-			$this->mark_paid(
-				$order,
-				array(
-					'paid'          => true,
-					'received_xmr'  => Monero_Util::pico_to_string( $summary['received_pico'] ),
-					'txids'         => $summary['txids'],
-					'confirmations' => (int) $summary['confirmations'],
-					'overpaid'      => '0' !== $summary['overpaid_pico'],
-					'overpaid_xmr'  => Monero_Util::pico_to_string( $summary['overpaid_pico'] ),
-				)
-			);
+			try {
+				$this->mark_paid(
+					$order,
+					array(
+						'paid'          => true,
+						'received_xmr'  => Monero_Util::pico_to_string( $summary['received_pico'] ),
+						'txids'         => $summary['txids'],
+						'confirmations' => (int) $summary['confirmations'],
+						'overpaid'      => '0' !== $summary['overpaid_pico'],
+						'overpaid_xmr'  => Monero_Util::pico_to_string( $summary['overpaid_pico'] ),
+					)
+				);
+			} finally {
+				$this->release_lock( $cooldown );
+			}
 			return 'paid';
 		}
 
@@ -1480,6 +1485,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			$order->delete_meta_data( '_monero_partial_flagged' );
 			$order->save();
 		}
+		$this->release_lock( $cooldown );
 		return $scan_reachable && $pool_reachable ? 'none' : 'unreachable';
 	}
 

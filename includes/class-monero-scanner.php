@@ -38,15 +38,17 @@ class Monero_Scanner {
 		return $this->deadline > 0 && microtime( true ) >= $this->deadline;
 	}
 
-	private function request_timeout() {
-		return $this->deadline > 0 ? max( 0.01, min( $this->http_timeout, $this->deadline - microtime( true ) ) ) : $this->http_timeout;
+	private function request_timeout( $remaining_nodes = 1 ) {
+		if ( $this->deadline <= 0 ) { return $this->http_timeout; }
+		$remaining = max( 0.01, min( $this->http_timeout, $this->deadline - microtime( true ) ) );
+		return max( 0.01, $remaining / max( 1, (int) $remaining_nodes ) );
 	}
 
 	private function node_rpc( $path, $body ) {
-		// Commitment verification keeps failover responses from forging a payment.
-		foreach ( $this->nodes as $node ) {
+		$total = count( $this->nodes );
+		foreach ( $this->nodes as $index => $node ) {
 			if ( $this->budget_exhausted() ) { break; }
-			$r = $this->node_rpc_one( $node, $path, $body );
+			$r = $this->node_rpc_one( $node, $path, $body, $total - $index );
 			if ( null !== $r ) { return $r; }
 		}
 		return null;
@@ -56,11 +58,11 @@ class Monero_Scanner {
 		return $this->last_node_error;
 	}
 
-	private function node_rpc_one( $node, $path, $body ) {
+	private function node_rpc_one( $node, $path, $body, $remaining_nodes = 1 ) {
 		$url     = $node['url'] . $path;
 		$payload = function_exists( 'wp_json_encode' ) ? wp_json_encode( $body ) : json_encode( $body );
 		if ( function_exists( 'wp_safe_remote_post' ) ) {
-			$args         = $this->request_args( $node, array( 'Content-Type' => 'application/json' ) );
+			$args         = $this->request_args( $node, array( 'Content-Type' => 'application/json' ), $remaining_nodes );
 			$args['body'] = $payload;
 			$res          = $this->wordpress_request( $node, $url, 'wp_safe_remote_post', $args );
 			if ( null === $res ) { return null; }
@@ -76,19 +78,19 @@ class Monero_Scanner {
 			'method'        => 'POST',
 			'header'        => "Content-Type: application/json\r\n",
 			'content'       => $payload,
-			'timeout'       => $this->request_timeout(),
+			'timeout'       => $this->request_timeout( $remaining_nodes ),
 			'ignore_errors' => true,
 		) ) );
 		$raw = @file_get_contents( $url, false, $ctx );
 		return $raw === false ? null : json_decode( $raw, true );
 	}
 
-	private function request_args( $node, $headers = array() ) {
+	private function request_args( $node, $headers = array(), $remaining_nodes = 1 ) {
 		if ( 'basic' === $node['auth'] ) {
 			$headers['Authorization'] = 'Basic ' . base64_encode( $node['username'] . ':' . $node['password'] );
 		}
 		return array(
-			'timeout'             => $this->request_timeout(),
+			'timeout'             => $this->request_timeout( $remaining_nodes ),
 			'headers'             => $headers,
 			'redirection'         => 0,
 			'limit_response_size' => 4 * 1024 * 1024,
@@ -261,17 +263,18 @@ class Monero_Scanner {
 	public function tip_height() {
 		// The lowest responding tip can delay settlement but cannot accelerate it.
 		$heights = array();
-		foreach ( $this->nodes as $node ) {
+		$total = count( $this->nodes );
+		foreach ( $this->nodes as $index => $node ) {
 			if ( $this->budget_exhausted() ) { break; }
-			$r = $this->node_rpc_get_one( $node, '/get_height' );
+			$r = $this->node_rpc_get_one( $node, '/get_height', $total - $index + 1 );
 			if ( $r && isset( $r['height'] ) && (int) $r['height'] > 0 ) { $heights[] = (int) $r['height']; }
 		}
 		return $heights ? min( $heights ) : null;
 	}
-	private function node_rpc_get_one( $node, $path ) {
+	private function node_rpc_get_one( $node, $path, $remaining_nodes = 1 ) {
 		$url = $node['url'] . $path;
 		if ( function_exists( 'wp_safe_remote_get' ) ) {
-			$res = $this->wordpress_request( $node, $url, 'wp_safe_remote_get', $this->request_args( $node ) );
+			$res = $this->wordpress_request( $node, $url, 'wp_safe_remote_get', $this->request_args( $node, array(), $remaining_nodes ) );
 			if ( null === $res ) { return null; }
 			$raw = wp_remote_retrieve_body( $res );
 			if ( strlen( $raw ) > 4 * 1024 * 1024 ) { return null; }
@@ -280,15 +283,16 @@ class Monero_Scanner {
 		if ( ! in_array( strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ), array( 'http', 'https' ), true ) ) {
 			return null;
 		}
-		$ctx = stream_context_create( array( 'http' => array( 'timeout' => $this->request_timeout(), 'ignore_errors' => true ) ) );
+		$ctx = stream_context_create( array( 'http' => array( 'timeout' => $this->request_timeout( $remaining_nodes ), 'ignore_errors' => true ) ) );
 		$raw = @file_get_contents( $url, false, $ctx );
 		return $raw === false ? null : json_decode( $raw, true );
 	}
 
 	private function node_rpc_get( $path ) {
-		foreach ( $this->nodes as $node ) {
+		$total = count( $this->nodes );
+		foreach ( $this->nodes as $index => $node ) {
 			if ( $this->budget_exhausted() ) { break; }
-			$response = $this->node_rpc_get_one( $node, $path );
+			$response = $this->node_rpc_get_one( $node, $path, $total - $index );
 			if ( null !== $response ) { return $response; }
 		}
 		return null;
