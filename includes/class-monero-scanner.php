@@ -44,14 +44,22 @@ class Monero_Scanner {
 		return max( 0.01, $remaining / max( 1, (int) $remaining_nodes ) );
 	}
 
-	private function node_rpc( $path, $body ) {
+	private function node_rpc( $path, $body, $validate = null ) {
 		$total = count( $this->nodes );
 		foreach ( $this->nodes as $index => $node ) {
 			if ( $this->budget_exhausted() ) { break; }
 			$r = $this->node_rpc_one( $node, $path, $body, $total - $index );
-			if ( null !== $r ) { return $r; }
+			if ( $this->rpc_response_valid( $r ) && ( null === $validate || $validate( $r ) ) ) { return $r; }
 		}
 		return null;
+	}
+
+	private function rpc_response_valid( $response ) {
+		if ( ! is_array( $response ) || isset( $response['error'] ) ) { return false; }
+		foreach ( array( $response, $response['result'] ?? array() ) as $value ) {
+			if ( is_array( $value ) && isset( $value['status'] ) && 'OK' !== $value['status'] ) { return false; }
+		}
+		return true;
 	}
 
 	public function last_node_error() {
@@ -167,13 +175,34 @@ class Monero_Scanner {
 	}
 
 	/** Fetch and decode a batch of transactions, or return null on node failure. */
-	public function fetch_txs( $txids ) {
+	public function fetch_txs( $txids, $allow_missing = false ) {
 		$txids = array_values( array_filter( (array) $txids ) );
 		if ( ! $txids ) { return array(); }
-		$resp = $this->node_rpc( '/get_transactions', array( 'txs_hashes' => $txids, 'decode_as_json' => true ) );
-		if ( ! $resp || ! isset( $resp['txs'] ) || ! is_array( $resp['txs'] ) ) { return null; }
+		$requested = array_fill_keys( array_map( 'strtolower', $txids ), true );
+		$validate = function ( $response ) use ( $requested, $allow_missing ) {
+			if ( array_key_exists( 'txs', $response ) && ! is_array( $response['txs'] ) ) { return false; }
+			$seen = array();
+			foreach ( $response['txs'] ?? array() as $tx ) {
+				if ( ! is_array( $tx ) || ! isset( $tx['tx_hash'], $tx['as_json'] ) || ! is_string( $tx['tx_hash'] ) || ! is_string( $tx['as_json'] ) ) { return false; }
+				$hash = strtolower( $tx['tx_hash'] );
+				$decoded = json_decode( $tx['as_json'], true );
+				if ( ! isset( $requested[ $hash ] ) || isset( $seen[ $hash ] ) || ! is_array( $decoded ) || ! isset( $decoded['vout'], $decoded['extra'] ) || ! is_array( $decoded['vout'] ) || ! is_array( $decoded['extra'] ) ) { return false; }
+				$seen[ $hash ] = true;
+			}
+			$missing = $response['missed_tx'] ?? array();
+			if ( ! is_array( $missing ) || ( ! $allow_missing && $missing ) ) { return false; }
+			foreach ( $missing as $hash ) {
+				if ( ! is_string( $hash ) ) { return false; }
+				$hash = strtolower( $hash );
+				if ( ! isset( $requested[ $hash ] ) || isset( $seen[ $hash ] ) ) { return false; }
+				$seen[ $hash ] = true;
+			}
+			return count( $seen ) === count( $requested );
+		};
+		$resp = $this->node_rpc( '/get_transactions', array( 'txs_hashes' => $txids, 'decode_as_json' => true ), $validate );
+		if ( ! $resp ) { return null; }
 		$out = array();
-		foreach ( $resp['txs'] as $tx ) {
+		foreach ( $resp['txs'] ?? array() as $tx ) {
 			$asjson = isset( $tx['as_json'] ) ? json_decode( $tx['as_json'], true ) : null;
 			if ( ! is_array( $asjson ) ) { continue; }
 			$asjson['_txid']         = isset( $tx['tx_hash'] ) ? $tx['tx_hash'] : '';
@@ -188,7 +217,7 @@ class Monero_Scanner {
 
 	/** Fetch and decode one transaction. */
 	public function fetch_tx( $txid ) {
-		$txs = $this->fetch_txs( array( $txid ) );
+		$txs = $this->fetch_txs( array( $txid ), true );
 		if ( ! is_array( $txs ) || ! isset( $txs[0] ) ) { return null; }
 		// Reject a node response for a different transaction.
 		if ( strcasecmp( (string) $txs[0]['_txid'], (string) $txid ) !== 0 ) { return null; }
@@ -197,7 +226,16 @@ class Monero_Scanner {
 
 	/** Call Monero daemon JSON-RPC. */
 	private function json_rpc( $method, $params = array() ) {
-		$r = $this->node_rpc( '/json_rpc', array( 'jsonrpc' => '2.0', 'id' => '0', 'method' => $method, 'params' => $params ) );
+		$validate = function ( $response ) use ( $method, $params ) {
+			if ( ! isset( $response['result'] ) || ! is_array( $response['result'] ) ) { return false; }
+			if ( 'get_block' !== $method ) { return true; }
+			$result = $response['result'];
+			if ( array_key_exists( 'tx_hashes', $result ) && ! is_array( $result['tx_hashes'] ) ) { return false; }
+			$hashes = $result['tx_hashes'] ?? array();
+			return isset( $result['block_header']['height'] ) && (int) $result['block_header']['height'] === (int) $params['height']
+				&& ( ! isset( $result['block_header']['num_txes'] ) || (int) $result['block_header']['num_txes'] === count( $hashes ) );
+		};
+		$r = $this->node_rpc( '/json_rpc', array( 'jsonrpc' => '2.0', 'id' => '0', 'method' => $method, 'params' => $params ), $validate );
 		return ( is_array( $r ) && isset( $r['result'] ) ) ? $r['result'] : null;
 	}
 
@@ -278,14 +316,16 @@ class Monero_Scanner {
 			if ( null === $res ) { return null; }
 			$raw = wp_remote_retrieve_body( $res );
 			if ( strlen( $raw ) > 4 * 1024 * 1024 ) { return null; }
-			return json_decode( $raw, true );
+			$response = json_decode( $raw, true );
+			return $this->rpc_response_valid( $response ) && isset( $response['height'] ) && (int) $response['height'] > 0 ? $response : null;
 		}
 		if ( ! in_array( strtolower( (string) wp_parse_url( $url, PHP_URL_SCHEME ) ), array( 'http', 'https' ), true ) ) {
 			return null;
 		}
 		$ctx = stream_context_create( array( 'http' => array( 'timeout' => $this->request_timeout( $remaining_nodes ), 'ignore_errors' => true ) ) );
 		$raw = @file_get_contents( $url, false, $ctx );
-		return $raw === false ? null : json_decode( $raw, true );
+		$response = $raw === false ? null : json_decode( $raw, true );
+		return $this->rpc_response_valid( $response ) && isset( $response['height'] ) && (int) $response['height'] > 0 ? $response : null;
 	}
 
 	private function node_rpc_get( $path ) {
@@ -382,6 +422,23 @@ class Monero_Scanner {
 		return $this->classify_tx( $tx, $address, $view_key, $tip, $require_commitment );
 	}
 
+	public function verify_payments( $txids, $address, $view_key, $opts = array() ) {
+		$tip = isset( $opts['tip'] ) ? (int) $opts['tip'] : null;
+		$require_commitment = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
+		$rows = array();
+		foreach ( array_chunk( array_values( array_unique( $txids ) ), 50 ) as $batch ) {
+			if ( $this->budget_exhausted() ) { return null; }
+			$txs = $this->fetch_txs( $batch, true );
+			if ( null === $txs ) { return null; }
+			foreach ( $txs as $tx ) {
+				if ( $this->budget_exhausted() ) { return null; }
+				$result = $this->classify_tx( $tx, $address, $view_key, $tip, $require_commitment );
+				$rows = array_merge( $rows, $result['outputs'] ?? array() );
+			}
+		}
+		return $this->budget_exhausted() ? null : $rows;
+	}
+
 	/** Detect and decode an output to an address inside one transaction. */
 	public function detect_in_tx( $tx, $address, $view_key ) {
 		$dec = $this->cn->decode_address( $address );
@@ -392,6 +449,7 @@ class Monero_Scanner {
 		if ( count( $vout ) > 256 ) { return null; } // guard: a real Monero tx has ≤ 16 outputs; 256 is already generous
 		$ecdh  = isset( $tx['rct_signatures']['ecdhInfo'] ) ? $tx['rct_signatures']['ecdhInfo'] : array();
 		$outpk = isset( $tx['rct_signatures']['outPk'] ) ? $tx['rct_signatures']['outPk'] : ( isset( $tx['rctsig_prunable']['outPk'] ) ? $tx['rctsig_prunable']['outPk'] : array() );
+		$matches = array();
 		for ( $i = 0; $i < count( $vout ); $i++ ) {
 			$t       = ( isset( $vout[ $i ]['target'] ) && is_array( $vout[ $i ]['target'] ) ) ? $vout[ $i ]['target'] : array();
 			$out_key = isset( $t['key'] ) ? $t['key'] : ( isset( $t['tagged_key']['key'] ) ? $t['tagged_key']['key'] : null );
@@ -413,7 +471,7 @@ class Monero_Scanner {
 					$amt_hex       = isset( $ecdh[ $i ]['amount'] ) ? $ecdh[ $i ]['amount'] : '';
 					$amount_atomic = '' !== $amt_hex ? $this->decode_amount( $derivation, $i, $amt_hex ) : '0';
 					$commitment    = $this->outpk_mask( $outpk, $i );
-					return array(
+					$matches[] = array(
 						'output_index'  => $i,
 						'amount_atomic' => $amount_atomic,
 						'out_key'       => $out_key,   // one-time output key (P): the burning-bug dedup key
@@ -423,7 +481,7 @@ class Monero_Scanner {
 					);
 				} catch ( \Throwable $e ) {
 					// The output is ours but undecodable; keep the failure visible.
-					return array(
+					$matches[] = array(
 						'output_index'      => $i,
 						'amount_atomic'     => '0',
 						'out_key'           => $out_key,
@@ -432,15 +490,26 @@ class Monero_Scanner {
 						'errored'           => true,
 					);
 				}
+				break;
 			}
 		}
-		return null;
+		return $matches ? array_merge( $matches[0], array( 'outputs' => $matches ) ) : null;
 	}
 
 	/** Add confirmations and lock state to a transaction match. */
 	private function classify_tx( $tx, $address, $view_key, $tip, $require_commitment ) {
 		$m = $this->detect_in_tx( $tx, $address, $view_key );
 		if ( null === $m ) { return array( 'found' => false, 'reason' => 'no output to this address' ); }
+		$outputs = array();
+		foreach ( $m['outputs'] as $output ) {
+			$row = $this->classify_output( $tx, $output, $tip, $require_commitment );
+			$row['txid'] = $tx['_txid'] ?? '';
+			$outputs[] = $row;
+		}
+		return array_merge( $outputs[0], array( 'outputs' => $outputs ) );
+	}
+
+	private function classify_output( $tx, $m, $tip, $require_commitment ) {
 		if ( $require_commitment && empty( $m['commitment_ok'] ) ) {
 			$present = ! empty( $m['commitment_present'] );
 			return array( 'found' => true, 'amount_atomic' => $m['amount_atomic'], 'output_index' => $m['output_index'], 'out_key' => isset( $m['out_key'] ) ? $m['out_key'] : '', 'commitment_ok' => false, 'commitment_present' => $present,
@@ -493,22 +562,26 @@ class Monero_Scanner {
 				$txs = $this->fetch_txs( $batch );
 				if ( null === $txs ) { return array( 'matches' => $matches, 'scanned_to' => $last ); }
 				foreach ( $txs as $tx ) {
-					$m = $this->detect_in_tx( $tx, $address, $view_key );
-					if ( null === $m ) { continue; }
-					if ( $req_commit && empty( $m['commitment_ok'] ) ) { continue; }
-					$bh   = isset( $tx['_block_height'] ) ? (int) $tx['_block_height'] : $h;
-					$conf = max( 0, $tip - $bh );
-					$matches[] = array(
-						'txid'          => isset( $tx['_txid'] ) ? $tx['_txid'] : '',
-						'amount_atomic' => $m['amount_atomic'],
-						'output_index'  => $m['output_index'],
-						'confirmations' => $conf,
-						'in_pool'       => false,
-						'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
-						'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
-						'commitment_ok' => $m['commitment_ok'],
-						'block_height'  => $bh,
-					);
+					if ( $this->budget_exhausted() ) { return array( 'matches' => $matches, 'scanned_to' => $last ); }
+					if ( ! empty( $tx['_in_pool'] ) || null === $tx['_block_height'] || (int) $tx['_block_height'] !== $h ) { return array( 'matches' => $matches, 'scanned_to' => $last ); }
+					$detected = $this->detect_in_tx( $tx, $address, $view_key );
+					if ( null === $detected ) { continue; }
+					foreach ( $detected['outputs'] as $m ) {
+						if ( $req_commit && empty( $m['commitment_ok'] ) ) { continue; }
+						$bh   = isset( $tx['_block_height'] ) ? (int) $tx['_block_height'] : $h;
+						$conf = max( 0, $tip - $bh );
+						$matches[] = array(
+							'txid'          => isset( $tx['_txid'] ) ? $tx['_txid'] : '',
+							'amount_atomic' => $m['amount_atomic'],
+							'output_index'  => $m['output_index'],
+							'confirmations' => $conf,
+							'in_pool'       => false,
+							'locked'        => $this->is_locked( isset( $tx['unlock_time'] ) ? $tx['unlock_time'] : 0, $bh, $conf, $tip ),
+							'out_key'       => isset( $m['out_key'] ) ? $m['out_key'] : '',
+							'commitment_ok' => $m['commitment_ok'],
+							'block_height'  => $bh,
+						);
+					}
 				}
 			}
 			$last = $h;
@@ -519,13 +592,18 @@ class Monero_Scanner {
 	/** Scan the daemon transaction pool for committed outputs. */
 	public function scan_pool( $address, $view_key, $opts = array() ) {
 		$req_commit = isset( $opts['require_commitment'] ) ? (bool) $opts['require_commitment'] : true;
-		$resp       = $this->node_rpc( '/get_transaction_pool', (object) array() );
-		if ( ! is_array( $resp ) || ! isset( $resp['transactions'] ) || ! is_array( $resp['transactions'] ) ) {
+		$validate = function ( $response ) {
+			return array_key_exists( 'transactions', $response ) ? is_array( $response['transactions'] )
+				: ( isset( $response['status'] ) && 'OK' === $response['status'] );
+		};
+		$resp       = $this->node_rpc( '/get_transaction_pool', (object) array(), $validate );
+		if ( null === $resp ) {
 			return null;
 		}
 
 		$matches = array();
-		foreach ( $resp['transactions'] as $pool_tx ) {
+		foreach ( $resp['transactions'] ?? array() as $pool_tx ) {
+			if ( $this->budget_exhausted() ) { return null; }
 			$tx = isset( $pool_tx['tx_json'] ) ? json_decode( $pool_tx['tx_json'], true ) : null;
 			if ( ! is_array( $tx ) ) { continue; }
 			$tx['_txid']             = isset( $pool_tx['id_hash'] ) ? (string) $pool_tx['id_hash'] : '';
@@ -533,19 +611,21 @@ class Monero_Scanner {
 			$tx['_in_pool']           = true;
 			$tx['_double_spend_seen'] = ! empty( $pool_tx['double_spend_seen'] );
 			$result = $this->classify_tx( $tx, $address, $view_key, null, $req_commit );
-			if ( empty( $result['found'] ) || ( $req_commit && empty( $result['commitment_ok'] ) ) ) { continue; }
-			$matches[] = array(
-				'txid'              => $tx['_txid'],
-				'amount_atomic'     => isset( $result['amount_atomic'] ) ? $result['amount_atomic'] : '0',
-				'output_index'      => isset( $result['output_index'] ) ? (int) $result['output_index'] : 0,
-				'confirmations'     => 0,
-				'in_pool'           => true,
-				'locked'            => ! empty( $result['locked'] ),
-				'double_spend_seen' => ! empty( $result['double_spend_seen'] ),
-				'out_key'           => isset( $result['out_key'] ) ? $result['out_key'] : '',
-				'commitment_ok'     => ! empty( $result['commitment_ok'] ),
-				'block_height'      => null,
-			);
+			foreach ( $result['outputs'] ?? array() as $output ) {
+				if ( $req_commit && empty( $output['commitment_ok'] ) ) { continue; }
+				$matches[] = array(
+					'txid'              => $tx['_txid'],
+					'amount_atomic'     => isset( $output['amount_atomic'] ) ? $output['amount_atomic'] : '0',
+					'output_index'      => isset( $output['output_index'] ) ? (int) $output['output_index'] : 0,
+					'confirmations'     => 0,
+					'in_pool'           => true,
+					'locked'            => ! empty( $output['locked'] ),
+					'double_spend_seen' => ! empty( $output['double_spend_seen'] ),
+					'out_key'           => isset( $output['out_key'] ) ? $output['out_key'] : '',
+					'commitment_ok'     => ! empty( $output['commitment_ok'] ),
+					'block_height'      => null,
+				);
+			}
 		}
 		return $matches;
 	}

@@ -100,6 +100,9 @@ function monero_gateway_wc_init() {
 		update_option( 'woocommerce_monero_gateway_settings', $migrated_settings );
 		$monero_settings = $migrated_settings;
 	}
+	if ( 'Monero' === get_option( 'woocommerce_currency' ) ) {
+		update_option( 'woocommerce_currency', 'XMR' );
+	}
 	if ( wp_next_scheduled( 'monero_update_event' ) ) { wp_clear_scheduled_hook( 'monero_update_event' ); }
 	$configured_nodes = Monero_Node_Config::normalize_list( $monero_settings['node_configs'] ?? ( $monero_settings['nodes'] ?? array() ) );
 	if ( is_admin() && isset( $monero_settings['confirm_type'] ) && ! $configured_nodes ) {

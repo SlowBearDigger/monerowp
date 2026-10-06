@@ -78,6 +78,11 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		add_action( 'woocommerce_receipt_' . $this->id, array( $this, 'render_payment_panel' ) );
 		add_action( 'woocommerce_view_order', array( $this, 'render_payment_panel' ) );
 		add_action( 'woocommerce_before_checkout_form', array( $this, 'maybe_show_rate_unavailable_notice' ) );
+		add_filter( 'render_block_woocommerce/checkout', function ( $content ) {
+			ob_start();
+			$this->maybe_show_rate_unavailable_notice();
+			return ob_get_clean() . $content;
+		} );
 		add_action( 'woocommerce_email_before_order_table', array( $this, 'email_instructions' ), 10, 3 );
 		add_action( 'woocommerce_checkout_create_order', array( $this, 'strip_pii' ), 20, 2 );
 		add_action( 'woocommerce_store_api_checkout_update_order_from_request', array( $this, 'strip_pii' ), 20, 2 );
@@ -666,7 +671,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		require_once __DIR__ . '/class-monero-scanner.php';
 		$infos = array();
 		foreach ( $nodes as $node ) {
-			$infos[] = ( new Monero_Scanner( $node, $network, 12 ) )->node_info();
+			$infos[] = ( new Monero_Scanner( array( $node ), $network, 12 ) )->node_info();
 		}
 		$health = self::node_health_allows_payments( $infos, $network ) ? 'ok' : 'invalid';
 		set_transient( $key, $health, 'ok' === $health ? 5 * MINUTE_IN_SECONDS : MINUTE_IN_SECONDS );
@@ -747,10 +752,10 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 	/** Calculate the order amount in XMR. */
 	public function get_xmr_amount( $order ) {
 		$currency = strtoupper( $order->get_currency() );
-		$total    = (float) $order->get_total();
 		if ( 'XMR' === $currency ) {
-			return Monero_Util::fmt( $total );
+			return Monero_Util::fmt( $order->get_total() );
 		}
+		$total = (float) $order->get_total();
 		$rate = $this->resolve_rate( $currency );
 		if ( is_wp_error( $rate ) ) {
 			return $rate;
@@ -1286,7 +1291,10 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		$at_cursor    = array_filter( $ids, function ( $order_id ) use ( $cursor ) { return $order_id <= $cursor; } );
 		$ids          = array_merge( $after_cursor, $at_cursor );
 		$scanned      = 0;
+		$started      = microtime( true );
 		foreach ( $ids as $order_id ) {
+			$remaining = 20.0 - ( microtime( true ) - $started );
+			if ( $remaining < 0.1 ) { break; }
 			$cursor = $order_id;
 			$order  = wc_get_order( $order_id );
 			if ( ! $order || $order->is_paid() || '' === (string) $order->get_meta( '_monero_address' ) ) {
@@ -1296,7 +1304,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 				continue;
 			}
 			++$scanned;
-			$this->scan_order( $order, 25.0, 90 );
+			$this->scan_order( $order, min( 25.0, $remaining ), 90 );
 			if ( $scanned >= 8 ) {
 				break;
 			}
@@ -1329,15 +1337,6 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		$scanner = $this->scanner();
 		$scanner->set_time_budget( $time_budget );
 		$tip     = $scanner->tip_height();
-		if ( null === $tip ) {
-			$this->log( 'scan failed for order #' . $order_id . ' — no Monero node returned a tip height', 'warning' );
-			$this->release_lock( $cooldown );
-			return 'unreachable';
-		}
-
-		$min_conf = (int) $this->get_option( 'min_confirmations', '1' );
-		$tol_pico = Monero_Util::xmr_to_pico( $this->get_option( 'tolerance_xmr', '0' ) );
-		$exp_pico = Monero_Util::xmr_to_pico( (string) $order->get_meta( '_monero_amount' ) );
 
 		$txids = json_decode( (string) $order->get_meta( '_monero_watch_txids' ), true );
 		if ( ! is_array( $txids ) ) {
@@ -1348,28 +1347,15 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 			$txids[] = $legacy;
 		}
 		$txids       = array_values( array_unique( $txids ) );
-		$verify_txids = array_slice( array_reverse( $txids ), 0, 50 );
-		if ( '' !== $legacy && ! in_array( $legacy, $verify_txids, true ) ) {
-			$verify_txids[] = $legacy;
+		$rows = null === $tip ? null : $scanner->verify_payments( $txids, $address, $view, array( 'tip' => $tip, 'require_commitment' => true ) );
+		if ( null === $rows ) {
+			$this->log( 'scan failed for order #' . $order_id . ' — node RPC unavailable or payment history incomplete', 'warning' );
+			$this->release_lock( $cooldown );
+			return 'unreachable';
 		}
-
-		$rows = array();
-		foreach ( $verify_txids as $txid ) {
-			$result = $scanner->verify_payment( $txid, $address, $view, array( 'tip' => $tip, 'require_commitment' => true ) );
-			if ( empty( $result['found'] ) ) {
-				continue;
-			}
-			$rows[] = array(
-				'txid'          => $txid,
-				'amount_atomic' => isset( $result['amount_atomic'] ) ? $result['amount_atomic'] : '0',
-				'confirmations' => array_key_exists( 'confirmations', $result ) ? $result['confirmations'] : null,
-				'in_pool'       => ! empty( $result['in_pool'] ),
-				'locked'        => ! empty( $result['locked'] ),
-				'double_spend_seen' => ! empty( $result['double_spend_seen'] ),
-				'out_key'       => isset( $result['out_key'] ) ? $result['out_key'] : '',
-				'commitment_ok' => ! empty( $result['commitment_ok'] ),
-			);
-		}
+		$min_conf = (int) $this->get_option( 'min_confirmations', '1' );
+		$tol_pico = Monero_Util::xmr_to_pico( $this->get_option( 'tolerance_xmr', '0' ) );
+		$exp_pico = Monero_Util::xmr_to_pico( (string) $order->get_meta( '_monero_amount' ) );
 		$pool_reachable = true;
 		$pool_matches   = array();
 		if ( 0 === $min_conf ) {
@@ -1444,6 +1430,7 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		}
 		$order->update_meta_data( '_monero_payment_status', $status );
 		$order->update_meta_data( '_monero_seen', Monero_Util::pico_to_string( $summary['seen_pico'] ) );
+		$order->update_meta_data( '_monero_received', Monero_Util::pico_to_string( $summary['received_pico'] ) );
 		$order->update_meta_data( '_monero_shortfall', Monero_Util::pico_to_string( $shortfall ) );
 		$order->update_meta_data( '_monero_confirmations', $confirmations );
 		$order->save();
@@ -1468,7 +1455,6 @@ class WC_Gateway_Monero extends WC_Payment_Gateway {
 		}
 
 		if ( gmp_cmp( gmp_init( (string) $summary['seen_pico'], 10 ), 0 ) > 0 ) {
-			$order->update_meta_data( '_monero_received', Monero_Util::pico_to_string( $summary['received_pico'] ) );
 			if ( 'yes' !== $order->get_meta( '_monero_partial_flagged' ) ) {
 				$order->update_meta_data( '_monero_partial_flagged', 'yes' );
 				$order->add_order_note(

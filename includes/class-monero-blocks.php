@@ -29,7 +29,7 @@ final class Monero_Blocks_Support extends AbstractPaymentMethodType {
 		wp_register_script(
 			'monero-gateway-blocks',
 			plugins_url( 'assets/js/monero-blocks.js', MONERO_GATEWAY_WC_FILE ),
-			array( 'wc-blocks-registry', 'wc-settings', 'wp-element', 'wp-html-entities', 'wp-i18n' ),
+			array( 'wc-blocks-registry', 'wc-blocks-checkout', 'wc-settings', 'wp-element', 'wp-html-entities', 'wp-i18n' ),
 			MONERO_GATEWAY_WC_VERSION,
 			true
 		);

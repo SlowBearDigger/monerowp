@@ -13,11 +13,15 @@
 	var Description = function (props) {
 		if (el.useEffect) {
 			el.useEffect(function () {
-				if (!(data.discount > 0 && props && props.extensionCartUpdate)) return;
-				props.extensionCartUpdate({
+				var updateCart = window.wc.blocksCheckout && window.wc.blocksCheckout.extensionCartUpdate;
+				if (!(data.discount > 0 && props && updateCart)) return;
+				updateCart({
 					namespace: 'monero-gateway',
 					data: { payment_method: props.activePaymentMethod || '' },
 				});
+				return function () {
+					updateCart({ namespace: 'monero-gateway', data: { payment_method: '' } });
+				};
 			}, [props && props.activePaymentMethod]);
 		}
 		return el.createElement('div', { style: { lineHeight: 1.5 } }, decode(data.description || ''));
