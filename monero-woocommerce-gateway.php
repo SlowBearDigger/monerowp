@@ -11,7 +11,7 @@
  * License:           MIT
  * Text Domain:       monero_gateway
  * WC requires at least: 7.0
- * WC tested up to:   10.9.3
+ * WC tested up to:   11.2.1
  */
 
 if ( ! defined( 'ABSPATH' ) ) {

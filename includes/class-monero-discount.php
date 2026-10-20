@@ -35,6 +35,7 @@ final class Monero_Gateway_Discount {
 		add_action( 'woocommerce_checkout_update_order_review', array( $this, 'classic_checkout_update' ) );
 		add_action( 'woocommerce_cart_loaded_from_session', array( $this, 'sync_cart_coupon' ) );
 		add_action( 'woocommerce_before_calculate_totals', array( $this, 'sync_cart_coupon' ) );
+		add_action( 'woocommerce_store_api_checkout_update_customer_from_request', array( $this, 'store_api_checkout' ), 10, 2 );
 		add_filter( 'woocommerce_cart_totals_coupon_label', array( $this, 'coupon_label' ), 10, 2 );
 	}
 
@@ -64,6 +65,17 @@ final class Monero_Gateway_Discount {
 		$this->set_selected_method( $data['payment_method'] );
 		$this->sync_cart_coupon();
 		return array();
+	}
+
+	public function store_api_checkout( $customer, $request ) {
+		if ( 'POST' !== $request->get_method() ) {
+			return;
+		}
+		$method = $request->get_param( 'payment_method' );
+		if ( is_string( $method ) ) {
+			$this->set_selected_method( $method );
+			WC()->cart->calculate_totals();
+		}
 	}
 
 	public function set_selected_method( $method ) {

@@ -3,7 +3,7 @@ Contributors: serhack, mosu-forge and Monero Integrations contributors
 Donate link: https://monerointegrations.com/donate.html
 Tags: monero, woocommerce, payment, cryptocurrency, accept monero
 Requires at least: 6.2
-Tested up to: 7.0
+Tested up to: 7.1.3
 Requires PHP: 8.0
 Stable tag: 4.0.0-dev
 License: MIT
